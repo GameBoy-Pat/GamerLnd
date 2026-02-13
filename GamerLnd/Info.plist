@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.pfprogramming.GamerLnd</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>gamerlnd</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>GamerLnd needs access to save your profile image.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>GamerLnd needs access to your photos to set your profile image.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+</dict>
+</plist>
