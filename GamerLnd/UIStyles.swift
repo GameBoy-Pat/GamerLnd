@@ -7,6 +7,89 @@
 // • AppIconCentered unchanged.
 
 import SwiftUI
+import UIKit
+
+func formatRatingValue(_ value: Double) -> String {
+    let roundedWhole = value.rounded(.towardZero)
+    if abs(value - roundedWhole) < 0.0001 {
+        return String(Int(roundedWhole))
+    }
+    return String(format: "%.1f", value)
+}
+
+struct HeartValueText: View {
+    let text: String
+    let size: CGFloat
+    var empty: Bool = false
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<4, id: \.self) { i in
+                let offsets: [CGSize] = [
+                    CGSize(width: -0.9, height: 0),
+                    CGSize(width: 0.9, height: 0),
+                    CGSize(width: 0, height: -0.9),
+                    CGSize(width: 0, height: 0.9)
+                ]
+                Text(text)
+                    .font(.system(size: max(8, size * 0.315), weight: .heavy, design: .rounded))
+                    .foregroundColor(.black.opacity(0.8))
+                    .offset(offsets[i])
+            }
+            Text(text)
+                .font(.system(size: max(8, size * 0.315), weight: .heavy, design: .rounded))
+                .foregroundColor(.white.opacity(empty ? 0.82 : 0.99))
+                .shadow(color: .black.opacity(0.45), radius: 1.2, x: 0, y: 0.8)
+        }
+        .minimumScaleFactor(0.55)
+        .lineLimit(1)
+        .padding(.horizontal, max(2, size * 0.12))
+        .offset(y: -max(0.6, size * 0.035))
+    }
+}
+
+struct RatingHeartBadge: View {
+    let value: Double
+    var size: CGFloat
+    var color: Color? = nil
+    var empty: Bool = false
+
+    private var resolvedColor: Color {
+        color ?? ColorTheme.ratingBandColor(for: value)
+    }
+
+    var body: some View {
+        ZStack {
+            PixelHeartIcon(
+                color: resolvedColor,
+                size: size,
+                empty: empty,
+                perfectScore: !empty && ColorTheme.isPerfectScore(value)
+            )
+            HeartValueText(
+                text: formatRatingValue(value),
+                size: size,
+                empty: empty
+            )
+        }
+    }
+}
+
+struct AverageHeartBadge: View {
+    let value: Double
+    var size: CGFloat
+
+    var body: some View {
+        LayeredHeartIcon(
+            baseAssetName: "heart_fill_base",
+            overlayAssetName: "gheart_no_color",
+            color: ColorTheme.ratingBandColor(for: value),
+            size: size,
+            perfectScore: ColorTheme.isPerfectScore(value)
+        )
+        .scaleEffect(1.5)
+    }
+}
 
 // MARK: - Design Tokens
 
@@ -65,6 +148,72 @@ struct AppIconCentered: View {
     }
 }
 
+struct KeyboardDismissAccessoryButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if UIImage(named: "keyboard_down") != nil {
+                    Image("keyboard_down")
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 22, height: 22)
+                        .foregroundColor(ColorTheme.accent)
+                } else {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(ColorTheme.accent)
+                }
+            }
+            .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct OverlayCloseButton: View {
+    var body: some View {
+        Image(systemName: "xmark")
+            .font(.caption.weight(.bold))
+            .foregroundColor(ColorTheme.accent)
+            .frame(width: 32, height: 32)
+            .background(
+                Circle()
+                    .fill(ColorTheme.surface.opacity(0.96))
+                    .overlay(
+                        Circle()
+                            .stroke(ColorTheme.separator, lineWidth: 1)
+                    )
+            )
+            .contentShape(Circle())
+    }
+}
+
+struct VisualEffectBlur: UIViewRepresentable {
+    var style: UIBlurEffect.Style = .systemUltraThinMaterialDark
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        UIVisualEffectView(effect: UIBlurEffect(style: style))
+    }
+
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {
+        uiView.effect = UIBlurEffect(style: style)
+    }
+}
+
+struct OverlayBackdrop: View {
+    var body: some View {
+        ZStack {
+            VisualEffectBlur(style: .systemUltraThinMaterialDark)
+                .ignoresSafeArea()
+            Color.black.opacity(0.36)
+                .ignoresSafeArea()
+        }
+    }
+}
+
 // MARK: - Containers
 
 // MARK: - Avatar
@@ -89,22 +238,8 @@ struct AvatarView: View {
             Circle().fill(backgroundColor(for: name))
 
             if let url = avatarURL, !url.isEmpty {
-                // Remote avatar image
-                AsyncImage(url: URL(string: url)) { phase in
-                    switch phase {
-                    case .success(let img):
-                        img
-                            .resizable()
-                            .scaledToFill()
-                    case .empty:
-                        ProgressView().tint(.white.opacity(0.8))
-                    case .failure:
-                        fallbackPerson
-                    @unknown default:
-                        fallbackPerson
-                    }
-                }
-                .clipShape(Circle())
+                CachedAvatarImage(urlString: url, fallback: AnyView(fallbackPerson))
+                    .clipShape(Circle())
             } else {
                 fallbackPerson
             }
@@ -127,5 +262,156 @@ struct AvatarView: View {
         let hash = name.unicodeScalars.map { UInt32($0.value) }.reduce(0, +)
         let idx = Int(hash % UInt32(palette.count))
         return palette[idx]
+    }
+}
+
+struct PixelHeartIcon: View {
+    var color: Color
+    var size: CGFloat = 12
+    var empty: Bool = false
+    var outlined: Bool = true
+    var outlineScale: CGFloat = 0.045
+    var glossy: Bool = true
+    var perfectScore: Bool = false
+    @State private var shimmerPhase: CGFloat = -1.1
+
+    var body: some View {
+        LayeredHeartIcon(
+            baseAssetName: "heart_fill_base",
+            overlayAssetName: "heart_no_color",
+            color: empty ? color.opacity(0.35) : color,
+            size: size,
+            perfectScore: perfectScore && !empty
+        )
+    }
+}
+
+private struct LayeredHeartIcon: View {
+    let baseAssetName: String
+    let overlayAssetName: String
+    let color: Color
+    let size: CGFloat
+    var perfectScore: Bool = false
+
+    var body: some View {
+        ZStack {
+            if perfectScore {
+                AngularGradient(
+                    colors: ColorTheme.perfectScoreRainbow + [ColorTheme.perfectScoreRainbow.first ?? .white],
+                    center: .center
+                )
+                .saturation(1.08)
+                .mask(baseMask)
+            } else {
+                baseShape(foreground: color)
+            }
+
+            Image(overlayAssetName)
+                .resizable()
+                .interpolation(.none)
+                .antialiased(false)
+                .scaledToFit()
+        }
+        .scaleEffect(overlayAssetName == "gheart_no_color" ? 1.26 : 1.0)
+        .frame(width: size, height: size)
+    }
+
+    private func baseShape(foreground: Color) -> some View {
+        Image(baseAssetName)
+            .renderingMode(.template)
+            .resizable()
+            .interpolation(.none)
+            .antialiased(false)
+            .scaledToFit()
+            .foregroundStyle(foreground)
+    }
+
+    private var baseMask: some View {
+        Image(baseAssetName)
+            .resizable()
+            .interpolation(.none)
+            .antialiased(false)
+            .scaledToFit()
+    }
+}
+
+private final class AvatarImageCache {
+    static let shared: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 200
+        cache.totalCostLimit = 40 * 1024 * 1024
+        return cache
+    }()
+    static let fm = FileManager.default
+    static let cacheDir: URL = {
+        let base = fm.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("gamerlnd-avatar-cache", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    static func diskURL(for urlString: String) -> URL {
+        let safe = String(urlString.hashValue.magnitude)
+        return cacheDir.appendingPathComponent("\(safe).img")
+    }
+}
+
+enum AvatarCacheManager {
+    static func clear() {
+        AvatarImageCache.shared.removeAllObjects()
+    }
+}
+
+private struct CachedAvatarImage: View {
+    let urlString: String
+    let fallback: AnyView
+    @State private var image: UIImage? = nil
+    @State private var isLoading: Bool = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else if isLoading {
+                ProgressView().tint(.white.opacity(0.8))
+            } else {
+                fallback
+            }
+        }
+        .task(id: urlString) { await load() }
+    }
+
+    @MainActor
+    private func load() async {
+        if let cached = AvatarImageCache.shared.object(forKey: urlString as NSString) {
+            image = cached
+            return
+        }
+
+        let diskURL = AvatarImageCache.diskURL(for: urlString)
+        if let data = try? Data(contentsOf: diskURL),
+           let ui = UIImage(data: data) {
+            AvatarImageCache.shared.setObject(ui, forKey: urlString as NSString)
+            image = ui
+            return
+        }
+
+        guard let url = URL(string: urlString) else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 20)
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let ui = UIImage(data: data) {
+                let bytes = Int(ui.size.width * ui.size.height * ui.scale * ui.scale * 4)
+                AvatarImageCache.shared.setObject(ui, forKey: urlString as NSString, cost: max(1, bytes))
+                try? data.write(to: diskURL, options: .atomic)
+                image = ui
+            }
+        } catch {
+            return
+        }
     }
 }

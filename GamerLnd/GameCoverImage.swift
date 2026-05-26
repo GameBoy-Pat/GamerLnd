@@ -45,38 +45,28 @@ struct GameCoverImage: View {
 
     var body: some View {
         let size = computeSize(for: preset)
-        // Tip: You can swap "t_cover_big" to another IGDB size if you want sharper images.
-        // Common sizes: t_thumb, t_cover_small, t_cover_big, t_720p, t_1080p, t_screenshot_med
-        let url = URL(string: "https://images.igdb.com/igdb/image/upload/t_cover_big/\(id).jpg")
+        let url = URL(string: "https://images.igdb.com/igdb/image/upload/\(igdbSizeToken(for: size))/\(id).jpg")
 
         ZStack {
             RoundedRectangle(cornerRadius: cornerRadius)
                 .fill(ColorTheme.surface.opacity(0.4))
                 .frame(width: size.width, height: size.height)
 
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .empty:
-                    ProgressView()
-                        .frame(width: size.width, height: size.height)
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: size.width, height: size.height)
-                        .clipped()
-                        .cornerRadius(cornerRadius)
-                case .failure:
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .fill(ColorTheme.background)
-                        .overlay(
-                            Image(systemName: "photo")
-                                .foregroundColor(ColorTheme.subtext)
-                        )
-                        .frame(width: size.width, height: size.height)
-                @unknown default:
-                    Color.clear.frame(width: size.width, height: size.height)
-                }
+            if let url {
+                CachedRemoteImage(
+                    url: url,
+                    cornerRadius: cornerRadius,
+                    maxPixel: max(size.width, size.height) * 3
+                )
+                .frame(width: size.width, height: size.height)
+            } else {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(ColorTheme.background)
+                    .overlay(
+                        Image(systemName: "photo")
+                            .foregroundColor(ColorTheme.subtext)
+                    )
+                    .frame(width: size.width, height: size.height)
             }
         }
         .frame(width: size.width, height: size.height)
@@ -94,5 +84,16 @@ struct GameCoverImage: View {
         case .custom(let w):
             return CGSize(width: w, height: w * 4.0 / 3.0)
         }
+    }
+
+    private func igdbSizeToken(for size: CGSize) -> String {
+        let longestEdge = max(size.width, size.height)
+        if longestEdge >= 170 {
+            return "t_1080p"
+        }
+        if longestEdge >= 120 {
+            return "t_720p"
+        }
+        return "t_cover_big"
     }
 }

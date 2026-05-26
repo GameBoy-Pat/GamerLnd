@@ -14,24 +14,37 @@ enum Haptic {
 }
 
 enum Haptics {
+    private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
+    private static let softImpactGenerator = UIImpactFeedbackGenerator(style: .soft)
+    private static let rigidImpactGenerator = UIImpactFeedbackGenerator(style: .rigid)
+    private static let successGenerator = UINotificationFeedbackGenerator()
+    private static let warningGenerator = UINotificationFeedbackGenerator()
+    private static let errorGenerator = UINotificationFeedbackGenerator()
+    private static let selectionGenerator = UISelectionFeedbackGenerator()
+
     static func play(_ h: Haptic) {
         switch h {
         case .tap:
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            lightImpact.prepare()
+            lightImpact.impactOccurred()
         case .success:
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            successGenerator.prepare()
+            successGenerator.notificationOccurred(.success)
         case .warning:
-            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            warningGenerator.prepare()
+            warningGenerator.notificationOccurred(.warning)
         case .error:
-            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            errorGenerator.prepare()
+            errorGenerator.notificationOccurred(.error)
         case .softImpact:
-            let gen = UIImpactFeedbackGenerator(style: .soft)
-            gen.prepare(); gen.impactOccurred()
+            softImpactGenerator.prepare()
+            softImpactGenerator.impactOccurred()
         case .rigidImpact:
-            let gen = UIImpactFeedbackGenerator(style: .rigid)
-            gen.prepare(); gen.impactOccurred()
+            rigidImpactGenerator.prepare()
+            rigidImpactGenerator.impactOccurred()
         case .selection:
-            UISelectionFeedbackGenerator().selectionChanged()
+            selectionGenerator.prepare()
+            selectionGenerator.selectionChanged()
         }
     }
 

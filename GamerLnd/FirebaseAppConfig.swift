@@ -22,9 +22,13 @@ final class FirebaseAppConfigurator {
     }
 
     func setUser(id: String?, username: String?) {
+        #if DEBUG
+        return
+        #else
         Crashlytics.crashlytics().setUserID(id ?? "anon")
         if let name = username, !name.isEmpty {
             Crashlytics.crashlytics().setCustomValue(name, forKey: "username")
         }
+        #endif
     }
 }

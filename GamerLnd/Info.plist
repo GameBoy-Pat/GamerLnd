@@ -19,6 +19,10 @@
 	<string>GamerLnd needs access to save your profile image.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>GamerLnd needs access to your photos to set your profile image.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>

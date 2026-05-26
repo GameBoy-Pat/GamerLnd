@@ -30,8 +30,10 @@ private struct ShimmerModifier: ViewModifier {
                     .offset(x: phase * 300)
             )
             .onAppear {
-                withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
-                    phase = 1.2
+                if phase < 1 {
+                    withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) {
+                        phase = 1.2
+                    }
                 }
             }
     }

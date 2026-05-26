@@ -50,11 +50,14 @@ final class ListsService {
     func createList(ownerId: String,
                     title: String,
                     description: String?,
-                    type: ListType,
-                    isPublic: Bool,
-                    tierLabels: [String]?,
-                    tierColors: [String]?,
-                    completion: @escaping (Result<UserList, Error>) -> Void) {
+                   type: ListType,
+                   isPublic: Bool,
+                   tierLabels: [String]?,
+                   tierColors: [String]?,
+                   tierTextColors: [String]? = nil,
+                   rankedShowNumbers: Bool = true,
+                   rankedTopDecoration: String? = nil,
+                   completion: @escaping (Result<UserList, Error>) -> Void) {
         guard !ownerId.isEmpty else { return }
         let id = UUID().uuidString
         let now = Timestamp(date: Date())
@@ -74,21 +77,33 @@ final class ListsService {
         if type == .tiered {
             data["tier_labels"] = tierLabels ?? ["S", "A", "B", "C", "D"]
             data["tier_colors"] = tierColors ?? ["", "", "", "", ""]
+            data["tier_text_colors"] = tierTextColors ?? ["#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF"]
+        }
+        if type == .ranked {
+            data["ranked_show_numbers"] = rankedShowNumbers
+            data["ranked_top_decoration"] = rankedTopDecoration ?? "medal"
         }
 
         db.collection("lists").document(id).setData(data, merge: false) { err in
             if let err = err { completion(.failure(err)); return }
-            completion(.success(UserList(id: id,
-                                         ownerId: ownerId,
-                                         title: title,
-                                         description: description ?? "",
-                                         type: type,
-                                         isPublic: isPublic,
-                                         createdAt: now,
-                                         updatedAt: now,
-                                         itemCount: 0,
-                                         tierLabels: data["tier_labels"] as? [String],
-                                         tierColors: data["tier_colors"] as? [String])))
+            let created = UserList(id: id,
+                                   ownerId: ownerId,
+                                   title: title,
+                                   description: description ?? "",
+                                   type: type,
+                                   isPublic: isPublic,
+                                   createdAt: now,
+                                   updatedAt: now,
+                                   itemCount: 0,
+                                   tierLabels: data["tier_labels"] as? [String],
+                                   tierColors: data["tier_colors"] as? [String],
+                                   tierTextColors: data["tier_text_colors"] as? [String],
+                                   rankedShowNumbers: (data["ranked_show_numbers"] as? Bool) ?? true,
+                                   rankedTopDecoration: data["ranked_top_decoration"] as? String)
+            completion(.success(created))
+            DispatchQueue.global(qos: .userInitiated).async {
+                RewardService.shared.awardForListCreate(listId: id)
+            }
         }
     }
 
@@ -101,6 +116,9 @@ final class ListsService {
                         type: ListType? = nil,
                         tierLabels: [String]? = nil,
                         tierColors: [String]? = nil,
+                        tierTextColors: [String]? = nil,
+                        rankedShowNumbers: Bool? = nil,
+                        rankedTopDecoration: String? = nil,
                         completion: (() -> Void)? = nil) {
         var patch: [String: Any] = [
             "title": title,
@@ -111,6 +129,9 @@ final class ListsService {
         if let type = type { patch["type"] = type.rawValue }
         if let labels = tierLabels { patch["tier_labels"] = labels }
         if let colors = tierColors { patch["tier_colors"] = colors }
+        if let textColors = tierTextColors { patch["tier_text_colors"] = textColors }
+        if let rankedShowNumbers = rankedShowNumbers { patch["ranked_show_numbers"] = rankedShowNumbers }
+        if let rankedTopDecoration = rankedTopDecoration { patch["ranked_top_decoration"] = rankedTopDecoration }
 
         db.collection("lists").document(listId).setData(patch, merge: true) { _ in completion?() }
     }
@@ -141,7 +162,12 @@ final class ListsService {
             "item_count": FieldValue.increment(Int64(items.count))
         ], forDocument: listRef)
 
-        batch.commit { _ in completion?() }
+        batch.commit { _ in
+            completion?()
+            DispatchQueue.global(qos: .userInitiated).async {
+                RewardService.shared.awardForListAdd(listId: listId, items: items)
+            }
+        }
     }
 
     func removeItems(listId: String, itemIds: [String], completion: (() -> Void)? = nil) {

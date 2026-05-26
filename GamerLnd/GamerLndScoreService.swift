@@ -29,9 +29,8 @@ final class GamerLndScoreService {
             .whereField("game_id", isEqualTo: gameId)
             .limit(to: 500) // MVP cap; can be paginated/refined later
             .getDocuments { snap, err in
-                if let err = err {
+                if err != nil {
                     // On any error, avoid crashing and return "no ratings yet" so the UI shows a CTA.
-                    print("GamerLndScoreService error for game \(gameId): \(err.localizedDescription)")
                     self.cache[gameId] = (avg: nil, count: 0)
                     completion(nil, 0)
                     return

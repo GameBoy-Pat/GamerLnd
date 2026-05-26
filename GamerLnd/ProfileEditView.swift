@@ -135,9 +135,16 @@ struct ProfileEditView: View {
 
     private func save() {
         isSaving = true; errorText = ""
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if ContentModeration.containsForbiddenProfileText(trimmedUsername) {
+            errorText = "Usernames cannot include profanity."
+            isSaving = false
+            return
+        }
 
         var patch: [String: Any] = [
-            "username": username.trimmingCharacters(in: .whitespacesAndNewlines),
+            "username": trimmedUsername,
             "bio": bio
         ]
         if !avatarURL.isEmpty {

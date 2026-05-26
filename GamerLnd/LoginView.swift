@@ -260,8 +260,16 @@ struct LoginView: View {
                 }
             }
         }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .onTapGesture { hideKeyboard() }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                KeyboardDismissAccessoryButton {
+                    focusedField = nil
+                    hideKeyboard()
+                }
+            }
+        }
         .preferredColorScheme(ColorTheme.preferredScheme)
         .sheet(isPresented: $showProfileSetup) {
             if let uid = profileSetupUserId {
@@ -314,6 +322,14 @@ struct LoginView: View {
 
         guard !cleanHandle.isEmpty, !cleanName.isEmpty else {
             self.errorMessage = "Enter display name and handle."
+            return
+        }
+        guard !ContentModeration.containsForbiddenProfileText(cleanName) else {
+            self.errorMessage = "Display names cannot include profanity."
+            return
+        }
+        guard !ContentModeration.containsForbiddenProfileText(cleanHandle) else {
+            self.errorMessage = "Usernames cannot include profanity."
             return
         }
 

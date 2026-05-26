@@ -11,6 +11,7 @@ struct CommentsBadge: View {
 
     @State private var count: Int = 0
     @State private var listening: Bool = false
+    @State private var listener: ListenerRegistration? = nil
 
     private let db = Firestore.firestore()
 
@@ -28,10 +29,7 @@ struct CommentsBadge: View {
     private func start() {
         guard !listening else { return }
         listening = true
-
-        // Use a collection group if you ever change hierarchy; for now simple collection.
-        // No order required for counting — this is efficient and uses existing composite index (log_id, created_at) if you order later.
-        db.collection("review_comments")
+        listener = db.collection("review_comments")
             .whereField("log_id", isEqualTo: logId)
             .addSnapshotListener(includeMetadataChanges: false) { snap, _ in
                 count = snap?.documents.count ?? 0
@@ -39,9 +37,8 @@ struct CommentsBadge: View {
     }
 
     private func stop() {
-        // Snapshot listeners are retained by the returned ListenerRegistration,
-        // but since we're adding an anonymous listener, it gets cleaned up when the view disappears.
-        // If you want strict control: refactor to keep a ListenerRegistration and call .remove() here.
+        listener?.remove()
+        listener = nil
         listening = false
     }
 }

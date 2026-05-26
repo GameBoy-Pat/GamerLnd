@@ -1,5 +1,5 @@
 // SettingsSheet.swift
-// App settings sheet with dark mode toggle, logout, privacy policy.
+// App settings sheet with dark mode locked for now, logout, privacy policy.
 // BEGINNERS:
 // • @AppStorage persists simple settings in UserDefaults across launches.
 // • Logout uses FirebaseAuth.signOut() and dismisses the sheet.
@@ -10,9 +10,14 @@ import FirebaseAuth
 
 struct SettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
+    var isFounder: Bool = false
+    var onResetGamification: (() -> Void)? = nil
+    var onRevealQuestBoard: (() -> Void)? = nil
+    var onTriggerTestSecretQuest: (() -> Void)? = nil
 
-    // Persisted setting for theme; GamerLndApp registers a default of "dark".
-    @AppStorage("themeMode") private var themeMode: String = "dark"
+    @AppStorage("feedCardTheme") private var feedCardTheme: String = "colorRush"
+    @AppStorage("censorProfanityInReviews") private var censorProfanityInReviews: Bool = true
+    @AppStorage("censorProfanityInComments") private var censorProfanityInComments: Bool = true
 
     // Local UI state
     @State private var showingPrivacy: Bool = false
@@ -24,19 +29,28 @@ struct SettingsSheet: View {
     @State private var errorText: String = ""
     @State private var deleteEmail: String = ""
     @State private var deletePassword: String = ""
-
     var body: some View {
         NavigationView {
             List {
                 // Appearance
                 Section(header: Text("Appearance").foregroundColor(ColorTheme.subtext)) {
-                    Picker("Theme", selection: $themeMode) {
-                        Text("Dark").tag("dark")
-                        Text("Light").tag("light")
-                        Text("System").tag("system")
+                    HStack {
+                        Text("Theme")
+                        Spacer()
+                        Text("Dark")
+                            .foregroundColor(ColorTheme.subtext)
                     }
-                    .pickerStyle(.segmented)
-                    .tint(ColorTheme.accent)
+
+                    Picker("Feed Card Theme", selection: $feedCardTheme) {
+                        Text("GamerLnd").tag("colorRush")
+                        Text("Glass").tag("glass")
+                    }
+                }
+                .listRowBackground(ColorTheme.surface)
+
+                Section(header: Text("Content").foregroundColor(ColorTheme.subtext)) {
+                    Toggle("Censor profanity in reviews", isOn: $censorProfanityInReviews)
+                    Toggle("Censor profanity in comments", isOn: $censorProfanityInComments)
                 }
                 .listRowBackground(ColorTheme.surface)
 
@@ -58,6 +72,47 @@ struct SettingsSheet: View {
                     }
                 }
                 .listRowBackground(ColorTheme.surface)
+
+                if isFounder {
+                    Section(header: Text("Founder Tools").foregroundColor(ColorTheme.subtext)) {
+                        if let onResetGamification {
+                            Button {
+                                onResetGamification()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "arrow.counterclockwise")
+                                    Text("Reset Gamification")
+                                }
+                                .foregroundColor(ColorTheme.highlight)
+                            }
+                        }
+
+                        if let onRevealQuestBoard {
+                            Button {
+                                onRevealQuestBoard()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "eye.fill")
+                                    Text("Reveal Quest Board")
+                                }
+                                .foregroundColor(ColorTheme.gold)
+                            }
+                        }
+
+                        if let onTriggerTestSecretQuest {
+                            Button {
+                                onTriggerTestSecretQuest()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "sparkles")
+                                    Text("Trigger Test Secret Quest")
+                                }
+                                .foregroundColor(ColorTheme.accent)
+                            }
+                        }
+                    }
+                    .listRowBackground(ColorTheme.surface)
+                }
 
                 // About
                 Section(header: Text("About").foregroundColor(ColorTheme.subtext)) {

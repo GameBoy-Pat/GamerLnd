@@ -3,6 +3,8 @@
 
 import SwiftUI
 import FirebaseCore
+import FirebaseCrashlytics
+import FirebaseAnalytics
 #if canImport(FirebaseAppCheck)
 import FirebaseAppCheck
 #endif
@@ -10,34 +12,29 @@ import FirebaseAppCheck
 @main
 struct GamerLndApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @AppStorage("themeMode") private var themeMode: String = "dark"
-
     init() {
-        // Force dark by default unless user overrides in Settings.
+        // Force dark for now.
         UserDefaults.standard.register(defaults: ["useDarkMode": true, "themeMode": "dark"])
+        URLCache.shared.memoryCapacity = 24 * 1024 * 1024
+        URLCache.shared.diskCapacity = 120 * 1024 * 1024
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .preferredColorScheme(preferredScheme)
+                .preferredColorScheme(.dark)
+                .ignoresSafeArea(.keyboard, edges: .all)
                 .onAppear {
                     Analytics.screen("app_root")
                     Analytics.logEvent("app_open", parameters: ["source": "cold_start"])
                 }
         }
     }
-
-    private var preferredScheme: ColorScheme? {
-        switch themeMode {
-        case "light": return .light
-        case "dark": return .dark
-        default: return nil
-        }
-    }
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate {
+    private var memoryWarningObserver: NSObjectProtocol?
+
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
         #if canImport(FirebaseAppCheck)
@@ -50,8 +47,27 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         if FirebaseApp.app() == nil {
             FirebaseApp.configure()
         }
+        #if DEBUG
+        FirebaseAnalytics.Analytics.setAnalyticsCollectionEnabled(false)
+        Crashlytics.crashlytics().setCrashlyticsCollectionEnabled(false)
+        #endif
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            ImageCache.shared.clear()
+            AvatarCacheManager.clear()
+            URLCache.shared.removeAllCachedResponses()
+        }
         Analytics.logEvent("app_launch", parameters: ["via": "didFinishLaunching"])
         return true
+    }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        if let observer = memoryWarningObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 }
 

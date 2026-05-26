@@ -36,20 +36,10 @@ struct GameScreenshotImage: View {
     }
 
     var body: some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFill()
-            case .empty:
-                ZStack {
-                    ColorTheme.surface
-                    ProgressView().tint(ColorTheme.accent)
-                }
-            case .failure:
-                ColorTheme.surface
-            @unknown default:
+        Group {
+            if let url {
+                CachedRemoteImage(url: url, cornerRadius: cornerRadius, maxPixel: 1280)
+            } else {
                 ColorTheme.surface
             }
         }

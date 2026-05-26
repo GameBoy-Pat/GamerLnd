@@ -3,7 +3,7 @@
 // BEGINNERS:
 // • Keep auth logic in one place so views stay simple.
 // • On signup, we create /users/{uid} so the rest of the app can read names, etc.
-// • deleteAccount() tries to delete the user's documents (users, user_stats, follows, likes, logs)
+// • deleteAccount() tries to delete the user's documents (users, user_stats, follows, likes, logs, gamification docs)
 //   and then deletes the Auth user. Some deletes are "best-effort" due to Firestore limits.
 
 import Foundation
@@ -229,6 +229,22 @@ final class AuthService: NSObject, ASAuthorizationControllerDelegate, ASAuthoriz
         deleteQuery(db.collection("notifications").whereField("user_id", isEqualTo: uid))
         deleteQuery(db.collection("notifications").whereField("creator_id", isEqualTo: uid))
 
+        // Gamification / progression state
+        deleteQuery(db.collection("daily_objectives").whereField("user_id", isEqualTo: uid))
+        deleteQuery(db.collection("weekly_objectives").whereField("user_id", isEqualTo: uid))
+        deleteQuery(db.collection("user_achievements").whereField("user_id", isEqualTo: uid))
+        deleteQuery(db.collection("user_secret_unlocks").whereField("user_id", isEqualTo: uid))
+
+        // Metrics / references
+        group.enter()
+        db.collection("user_metrics").document(uid).delete { err in
+            if let err = err, firstError == nil { firstError = err }
+            group.leave()
+        }
+
+        // Lists owned by this user
+        deleteQuery(db.collection("lists").whereField("owner_id", isEqualTo: uid))
+
         group.notify(queue: .main) {
             completion(firstError) // nil on best-effort success
         }
@@ -255,16 +271,19 @@ final class AuthService: NSObject, ASAuthorizationControllerDelegate, ASAuthoriz
                 }
                 return "user_" + uid.prefix(6)
             }()
+            let safeUsername: String = ContentModeration.containsForbiddenProfileText(derivedUsername)
+                ? "user_" + uid.prefix(6)
+                : derivedUsername
 
             let payload: [String: Any] = [
                 "id": uid,
                 "email": user.email ?? "",
-                "display_name": derivedUsername,
-                "display_name_lower": derivedUsername.lowercased(),
-                "username": derivedUsername.lowercased(),
-                "username_lower": derivedUsername.lowercased(),
-                "handle": derivedUsername.lowercased(),
-                "search_prefix": UserProfile.searchPrefixes(username: derivedUsername, handle: derivedUsername.lowercased()),
+                "display_name": safeUsername,
+                "display_name_lower": safeUsername.lowercased(),
+                "username": safeUsername.lowercased(),
+                "username_lower": safeUsername.lowercased(),
+                "handle": safeUsername.lowercased(),
+                "search_prefix": UserProfile.searchPrefixes(username: safeUsername, handle: safeUsername.lowercased()),
                 "bio": "",
                 "profile_picture_url": "",
                 "created_at": Timestamp(date: Date())

@@ -26,7 +26,7 @@ final class NotificationService {
         // If you try to notify yourself, silently ignore.
         guard me != toUserId else { return }
 
-        let id = UUID().uuidString
+        let id = deterministicId(creatorId: me, toUserId: toUserId, relatedLogId: relatedLogId, type: type)
         let payload: [String: Any] = [
             "id": id,
             "user_id": toUserId,           // recipient
@@ -36,5 +36,15 @@ final class NotificationService {
             "created_at": Timestamp(date: Date())
         ]
         db.collection("notifications").document(id).setData(payload, merge: false)
+    }
+
+    func delete(toUserId: String, relatedLogId: String, type: NotifType) {
+        guard let me = Auth.auth().currentUser?.uid else { return }
+        let id = deterministicId(creatorId: me, toUserId: toUserId, relatedLogId: relatedLogId, type: type)
+        db.collection("notifications").document(id).delete()
+    }
+
+    private func deterministicId(creatorId: String, toUserId: String, relatedLogId: String, type: NotifType) -> String {
+        "\(creatorId)_\(toUserId)_\(relatedLogId)_\(type.rawValue)"
     }
 }

@@ -11,15 +11,23 @@ typealias Analytics = AppAnalytics
 enum AppAnalytics {
     /// Generic logger — mirrors Firebase's signature.
     static func logEvent(_ name: String, parameters: [String: Any]? = nil) {
+        #if DEBUG
+        return
+        #else
         FirebaseAnalytics.Analytics.logEvent(name, parameters: parameters)
+        #endif
     }
 
     /// Standardized screen view event.
     static func screen(_ name: String) {
+        #if DEBUG
+        return
+        #else
         FirebaseAnalytics.Analytics.logEvent(
             AnalyticsEventScreenView,
             parameters: [AnalyticsParameterScreenName: name]
         )
+        #endif
     }
 
     // MARK: - Convenience helpers (optional but handy)

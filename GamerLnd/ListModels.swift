@@ -32,6 +32,11 @@ struct UserList: Identifiable, Hashable, Codable {
     // Optional tier metadata (only for tiered lists)
     var tierLabels: [String]?
     var tierColors: [String]?
+    var tierTextColors: [String]?
+
+    // Optional ranked-list presentation metadata
+    var rankedShowNumbers: Bool
+    var rankedTopDecoration: String?
 
     init(id: String,
          ownerId: String,
@@ -43,7 +48,10 @@ struct UserList: Identifiable, Hashable, Codable {
          updatedAt: Timestamp,
          itemCount: Int,
          tierLabels: [String]? = nil,
-         tierColors: [String]? = nil) {
+         tierColors: [String]? = nil,
+         tierTextColors: [String]? = nil,
+         rankedShowNumbers: Bool = true,
+         rankedTopDecoration: String? = nil) {
         self.id = id
         self.ownerId = ownerId
         self.title = title
@@ -55,6 +63,9 @@ struct UserList: Identifiable, Hashable, Codable {
         self.itemCount = itemCount
         self.tierLabels = tierLabels
         self.tierColors = tierColors
+        self.tierTextColors = tierTextColors
+        self.rankedShowNumbers = rankedShowNumbers
+        self.rankedTopDecoration = rankedTopDecoration
     }
 
     init?(id: String, data: [String: Any]) {
@@ -81,7 +92,10 @@ struct UserList: Identifiable, Hashable, Codable {
             updatedAt: updatedAt,
             itemCount: itemCount,
             tierLabels: data["tier_labels"] as? [String],
-            tierColors: data["tier_colors"] as? [String]
+            tierColors: data["tier_colors"] as? [String],
+            tierTextColors: data["tier_text_colors"] as? [String],
+            rankedShowNumbers: (data["ranked_show_numbers"] as? Bool) ?? true,
+            rankedTopDecoration: data["ranked_top_decoration"] as? String
         )
     }
 }

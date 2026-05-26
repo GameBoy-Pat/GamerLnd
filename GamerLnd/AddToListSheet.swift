@@ -23,6 +23,7 @@ import FirebaseFirestore
 struct AddToListSheet: View {
     let ownerId: String
     let game: Game
+    var onClose: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
 
@@ -36,109 +37,185 @@ struct AddToListSheet: View {
     @State private var loading: Bool = false
     @State private var adding: Bool = false
     @State private var errorText: String = ""
+    @State private var successText: String = ""
     @State private var showingNewList: Bool = false
     @State private var previewCovers: [String: [String]] = [:]
 
     private let db = Firestore.firestore()
 
     var body: some View {
-        NavigationView {
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
+            headerSection
+            gameSummarySection
+
+            Group {
                 if loading {
-                    ProgressView()
-                        .tint(ColorTheme.accent)
-                        .padding()
-                }
-
-                List {
-                    Section {
-                        ForEach(lists, id: \.id) { list in
-                            row(for: list)
-                                .listRowBackground(ColorTheme.surface)
-                        }
-                        if lists.isEmpty && !loading {
-                            Text("No lists yet. Create one to get started.")
-                                .foregroundColor(ColorTheme.subtext)
-                                .font(.caption)
-                                .listRowBackground(ColorTheme.surface)
-                        }
+                    VStack(spacing: 14) {
+                        Spacer(minLength: 0)
+                        ProgressView()
+                            .tint(ColorTheme.accent)
+                        Text("Loading your lists…")
+                            .font(.footnote)
+                            .foregroundColor(ColorTheme.subtext)
+                        Spacer(minLength: 0)
                     }
-                }
-                .listStyle(.insetGrouped)
-                .background(ColorTheme.background)
-
-                // Error text
-                if !errorText.isEmpty {
-                    Text(errorText)
-                        .font(.caption)
-                        .foregroundColor(ColorTheme.highlight)
+                } else if lists.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("No lists yet. Create one to get started.")
+                            .foregroundColor(ColorTheme.subtext)
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                } else {
+                    ScrollView(showsIndicators: false) {
+                        LazyVStack(spacing: 10) {
+                            ForEach(lists, id: \.id) { list in
+                                row(for: list)
+                            }
+                        }
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                }
-
-                // Bottom actions
-                HStack(spacing: 10) {
-                    Button {
-                        showingNewList = true
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "plus.circle.fill")
-                            Text("New List")
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(ColorTheme.accent)
-
-                    Spacer()
-
-                    Button {
-                        addToSelectedLists()
-                    } label: {
-                        HStack(spacing: 8) {
-                            if adding { ProgressView().tint(.white) }
-                            Text(selected.isEmpty ? "Add" : "Add to \(selected.count) \(selected.count == 1 ? "List" : "Lists")")
-                                .bold()
-                        }
-                        .frame(height: UIStyles.Buttons.compactHeight)
-                        .padding(.horizontal, 14)
-                        .background(selected.isEmpty || adding ? ColorTheme.separator : ColorTheme.accent)
-                        .foregroundColor(.white)
-                        .cornerRadius(UIStyles.Buttons.primaryCorner)
-                    }
-                    .disabled(selected.isEmpty || adding)
-                }
-                .padding(12)
-                .background(ColorTheme.background)
-            }
-            .background(ColorTheme.background.ignoresSafeArea())
-            .navigationTitle("Add to Lists")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.caption.weight(.bold))
-                            .foregroundColor(ColorTheme.accent)
+                        .padding(.top, 8)
+                        .padding(.bottom, 16)
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            statusSection
+            actionSection
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(ColorTheme.background.ignoresSafeArea())
         .tint(ColorTheme.accent)
         .preferredColorScheme(ColorTheme.preferredScheme)
         .presentationCornerRadius(16)
         .sheet(isPresented: $showingNewList, onDismiss: { loadLists() }) {
-            // Create a new list, then add this game to it and reload
             ListEditorSheet(ownerId: ownerId, onCreated: { newList in
                 addGameToList(newList) {
                     loadLists()
                     showingNewList = false
-                    dismiss()
+                    closeSheet()
                 }
             })
                 .preferredColorScheme(ColorTheme.preferredScheme)
         }
         .onAppear { loadLists() }
+    }
+
+    private var headerSection: some View {
+        HStack {
+            Text("Add to Lists")
+                .font(.title3.weight(.bold))
+                .foregroundColor(ColorTheme.text)
+            Spacer()
+            Button {
+                closeSheet()
+            } label: {
+                OverlayCloseButton()
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 10)
+        .background(ColorTheme.background)
+    }
+
+    private var gameSummarySection: some View {
+        HStack(spacing: 12) {
+            if let imgId = game.cover?.imageId ?? game.screenshots?.first?.imageId {
+                GameCoverImage(id: imgId, preset: .custom(width: 58), cornerRadius: 8)
+                    .frame(width: 58, height: 78)
+            } else {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(ColorTheme.separator.opacity(0.25))
+                    .frame(width: 58, height: 78)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(game.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(ColorTheme.text)
+                    .lineLimit(2)
+                Text("Choose one or more lists for this game.")
+                    .font(.caption)
+                    .foregroundColor(ColorTheme.subtext)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(ColorTheme.surface)
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(ColorTheme.separator, lineWidth: 1))
+        )
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    private var statusSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !errorText.isEmpty {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundColor(ColorTheme.highlight)
+            }
+            if !successText.isEmpty {
+                Text(successText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(ColorTheme.accent)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.bottom, (errorText.isEmpty && successText.isEmpty) ? 0 : 8)
+    }
+
+    private var actionSection: some View {
+        HStack(spacing: 10) {
+            Button {
+                showingNewList = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle.fill")
+                    Text("New List")
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(height: 48)
+                .padding(.horizontal, 14)
+                .background(RoundedRectangle(cornerRadius: 12).fill(ColorTheme.surface))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(ColorTheme.separator, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(ColorTheme.accent)
+
+            Spacer(minLength: 0)
+
+            Button {
+                addToSelectedLists()
+            } label: {
+                HStack(spacing: 8) {
+                    if adding { ProgressView().tint(.white) }
+                    Text(selected.isEmpty ? "Add" : "Add to \(selected.count) \(selected.count == 1 ? "List" : "Lists")")
+                        .bold()
+                }
+                .frame(height: 48)
+                .padding(.horizontal, 16)
+                .background(selected.isEmpty || adding ? ColorTheme.separator : ColorTheme.accent)
+                .foregroundColor(.white)
+                .cornerRadius(12)
+            }
+            .disabled(selected.isEmpty || adding)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 16)
+        .background(ColorTheme.background)
     }
 
     // MARK: - Rows
@@ -161,6 +238,7 @@ struct AddToListSheet: View {
 
     private func loadLists() {
         errorText = ""
+        successText = ""
         loading = true
         ListsService.shared.fetchLists(forUserId: ownerId) { lists in
             DispatchQueue.main.async {
@@ -246,6 +324,7 @@ struct AddToListSheet: View {
         guard !selected.isEmpty else { return }
         adding = true
         errorText = ""
+        successText = ""
 
         let group = DispatchGroup()
         let listById = Dictionary(uniqueKeysWithValues: lists.map { ($0.id, $0) })
@@ -262,7 +341,18 @@ struct AddToListSheet: View {
 
         group.notify(queue: .main) {
             self.adding = false
-            self.dismiss()
+            self.successText = "Game added."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                self.closeSheet()
+            }
+        }
+    }
+
+    private func closeSheet() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
         }
     }
 

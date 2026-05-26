@@ -56,13 +56,7 @@ struct GameActivitySnapshotView: View {
                 }
 
                 if let r = rating {
-                    HStack(spacing: 6) {
-                        Image(systemName: "heart.fill")
-                            .foregroundColor(ColorTheme.highlight)
-                        Text(String(format: "%.1f", r))
-                            .font(.footnote.weight(.semibold))
-                            .foregroundColor(ColorTheme.highlight)
-                    }
+                    RatingHeartBadge(value: r, size: 22)
                 }
             }
             Spacer(minLength: 0)

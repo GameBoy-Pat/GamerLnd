@@ -115,6 +115,8 @@ struct EditProfileSheet: View {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count < 2 || trimmed.count > 32 {
             nameError = "Name must be 2–32 characters."
+        } else if ContentModeration.containsForbiddenProfileText(trimmed) {
+            nameError = "Display names cannot include profanity."
         } else {
             nameError = nil
         }
@@ -123,7 +125,13 @@ struct EditProfileSheet: View {
     private func validateUsernameFormat() {
         let h = username.lowercased()
         let ok = h.range(of: "^[a-z0-9_]{3,20}$", options: .regularExpression) != nil
-        usernameError = ok ? nil : "Username must be 3–20 chars, a–z, 0–9, or _"
+        if !ok {
+            usernameError = "Username must be 3–20 chars, a–z, 0–9, or _"
+        } else if ContentModeration.containsForbiddenProfileText(h) {
+            usernameError = "Usernames cannot include profanity."
+        } else {
+            usernameError = nil
+        }
     }
 
     private func validateBio() {

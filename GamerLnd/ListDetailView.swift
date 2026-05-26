@@ -25,6 +25,12 @@ struct ListDetailView: View {
     @State private var nameCache: [Int: String] = [:]
     @State private var loading: Bool = false
     @State private var errorText: String = ""
+    @State private var currentListTitle: String = ""
+    @State private var currentListIsPublic: Bool = true
+    @State private var currentListUpdatedAt: Timestamp
+    @State private var draftListTitle: String = ""
+    @State private var draftListIsPublic: Bool = true
+    @State private var showEditMetaSheet: Bool = false
 
     // UI
     @State private var showAddSheet: Bool = false
@@ -34,6 +40,11 @@ struct ListDetailView: View {
     // Tier edit mode
     @State private var editTierMode: Bool = false
     @State private var draggingItemID: String? = nil
+    @State private var editableTierLabels: [String] = []
+    @State private var editableTierColors: [String] = []
+    @State private var editableTierTextColors: [String] = []
+    @State private var editingTierIndex: Int? = nil
+    @State private var liftedPoolItemId: String? = nil
 
     // Ranked edit + layout
     enum RankedLayout { case list, grid }
@@ -43,29 +54,41 @@ struct ListDetailView: View {
 
     private let db = Firestore.firestore()
 
+    init(list: UserList, isOwner: Bool) {
+        self.list = list
+        self.isOwner = isOwner
+        _currentListTitle = State(initialValue: list.title)
+        _currentListIsPublic = State(initialValue: list.isPublic)
+        _currentListUpdatedAt = State(initialValue: list.updatedAt)
+        _draftListTitle = State(initialValue: list.title)
+        _draftListIsPublic = State(initialValue: list.isPublic)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            header
+            if list.type != .tiered {
+                header
 
-            // Description (roomier card)
-            if !list.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                HStack {
-                    Text(list.description)
-                        .font(.footnote)
-                        .foregroundColor(ColorTheme.text)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(ColorTheme.surface)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(ColorTheme.separator, lineWidth: 1)
-                                )
-                        )
+                // Description (roomier card)
+                if !list.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HStack {
+                        Text(list.description)
+                            .font(.footnote)
+                            .foregroundColor(ColorTheme.text)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(ColorTheme.surface)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(ColorTheme.separator, lineWidth: 1)
+                                    )
+                            )
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
             }
 
             if loading {
@@ -75,6 +98,7 @@ struct ListDetailView: View {
             contentList
         }
         .background(ColorTheme.background.ignoresSafeArea())
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             // Center brand
@@ -171,68 +195,258 @@ struct ListDetailView: View {
                 }
             }
         }
-        .onAppear { loadItems() }
-        .sheet(isPresented: $showAddSheet, onDismiss: { loadItems() }) {
-            if let uid = Auth.auth().currentUser?.uid {
-                AddGamesToListSheet(listId: list.id, ownerId: uid)
-                    .preferredColorScheme(ColorTheme.preferredScheme)
-                    .presentationDetents([.fraction(0.85)])
-                    .presentationDragIndicator(.hidden)
-                    .presentationCornerRadius(16)
+        .onAppear {
+            seedTierEditorStateIfNeeded()
+            loadItems()
+        }
+        .overlay {
+            if showAddSheet, let uid = Auth.auth().currentUser?.uid {
+                ZStack {
+                    OverlayBackdrop()
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            showAddSheet = false
+                            loadItems()
+                        }
+
+                    AddGamesToListSheet(
+                        listId: list.id,
+                        ownerId: uid,
+                        onClose: {
+                            showAddSheet = false
+                            loadItems()
+                        },
+                        onAdded: {
+                            loadItems()
+                        }
+                    )
+                    .frame(width: min(UIScreen.main.bounds.width - 24, 390),
+                           height: min(UIScreen.main.bounds.height - 180, 640))
+                    .padding(.horizontal, 12)
+                }
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+            }
+        }
+        .overlay {
+            if let idx = editingTierIndex {
+                tierHeaderEditorOverlay(index: idx)
             }
         }
         .confirmationDialog("Delete this list?", isPresented: $showConfirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { deleteList() }
             Button("Cancel", role: .cancel) {}
         }
+        .overlay {
+            if showEditMetaSheet {
+                listMetaEditorOverlay
+            }
+        }
     }
 
     // MARK: - Header
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text(list.title)
-                    .font(.title3.weight(.semibold))
-                    .foregroundColor(ColorTheme.text)
-                if list.isPublic {
-                    Text("Public")
-                        .font(.caption2.weight(.bold))
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(ColorTheme.accent))
-                } else {
-                    Text("Private")
-                        .font(.caption2.weight(.bold))
-                        .foregroundColor(ColorTheme.subtext)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(ColorTheme.separator, lineWidth: 1))
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
+    private var tieredHeroHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(currentListTitle)
+                        .font(.title3.weight(.heavy))
+                        .foregroundColor(ColorTheme.text)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.85)
 
-            if let tlabels = list.tierLabels, !tlabels.isEmpty, list.type == .tiered {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(tlabels.enumerated()), id: \.offset) { idx, label in
-                            let txt = label.trimmingCharacters(in: .whitespacesAndNewlines)
-                            Text(txt.isEmpty ? defaultTierLabel(idx) : txt)
-                                .font(.caption2.weight(.semibold))
-                                .foregroundColor(ColorTheme.text)
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(ColorTheme.surface)
-                                )
-                        }
+                    if !list.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(list.description)
+                            .font(.caption)
+                            .foregroundColor(ColorTheme.subtext)
+                            .lineLimit(2)
                     }
-                    .padding(.horizontal, 16)
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 8) {
+                    Image(systemName: currentListIsPublic ? "globe" : "lock.fill")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(currentListIsPublic ? ColorTheme.accent : ColorTheme.subtext)
+                        .frame(width: 30, height: 30)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(ColorTheme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(ColorTheme.separator, lineWidth: 1))
+
+                    if isOwner && editTierMode {
+                        Image(systemName: "pencil")
+                            .font(.footnote.weight(.bold))
+                            .foregroundColor(ColorTheme.accent)
+                            .frame(width: 30, height: 30)
+                            .background(RoundedRectangle(cornerRadius: 9).fill(ColorTheme.surface))
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(ColorTheme.separator, lineWidth: 1))
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                ForEach(Array(normalizedTierColors().prefix(5).enumerated()), id: \.offset) { idx, hex in
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(colorFromHex(hex))
+                        .frame(width: 20, height: 20)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(ColorTheme.separator.opacity(0.35), lineWidth: 0.75)
+                        )
+                        .onTapGesture {
+                            guard isOwner && editTierMode else { return }
+                            editingTierIndex = idx
+                        }
+                }
+
+                Spacer()
+
+                if editTierMode {
+                    Text("Tap a color chip or lane label to edit")
+                        .font(.caption2)
+                        .foregroundColor(ColorTheme.subtext)
                 }
             }
         }
-        .padding(.bottom, 8)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(
+                    LinearGradient(
+                        colors: [ColorTheme.surface.opacity(0.92), ColorTheme.surface.opacity(0.72)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(ColorTheme.separator, lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 0)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    guard isOwner && (editTierMode || rankedEditMode) else { return }
+                    draftListTitle = currentListTitle
+                    draftListIsPublic = currentListIsPublic
+                    showEditMetaSheet = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(currentListTitle)
+                            .font(.title3.weight(.semibold))
+                            .foregroundColor(ColorTheme.text)
+                        if isOwner && (editTierMode || rankedEditMode) {
+                            Image(systemName: "pencil")
+                                .font(.caption.weight(.bold))
+                                .foregroundColor(ColorTheme.accent)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                if list.type == .tiered {
+                    HStack(spacing: 4) {
+                        ForEach(Array(normalizedTierColors().prefix(5).enumerated()), id: \.offset) { idx, hex in
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(colorFromHex(hex))
+                                .frame(width: 16, height: 16)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(ColorTheme.separator.opacity(0.35), lineWidth: 0.5)
+                                )
+                                .onTapGesture {
+                                    guard isOwner && editTierMode else { return }
+                                    editingTierIndex = idx
+                                }
+                        }
+                    }
+                }
+                Button {
+                    guard isOwner && (editTierMode || rankedEditMode) else { return }
+                    draftListTitle = currentListTitle
+                    draftListIsPublic = currentListIsPublic
+                    showEditMetaSheet = true
+                } label: {
+                    Image(systemName: currentListIsPublic ? "globe" : "lock.fill")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(currentListIsPublic ? ColorTheme.accent : ColorTheme.subtext)
+                        .frame(width: 28, height: 28)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(ColorTheme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(ColorTheme.separator, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var listMetaEditorOverlay: some View {
+        ZStack {
+            OverlayBackdrop()
+                .ignoresSafeArea()
+                .onTapGesture {
+                    showEditMetaSheet = false
+                }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Edit List")
+                        .font(.headline.weight(.bold))
+                        .foregroundColor(ColorTheme.text)
+                    Spacer()
+                    Button {
+                        showEditMetaSheet = false
+                    } label: {
+                        OverlayCloseButton()
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                TextField("List title", text: $draftListTitle)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(ColorTheme.surface))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(ColorTheme.separator, lineWidth: 1))
+                    .foregroundColor(ColorTheme.text)
+
+                Toggle(isOn: $draftListIsPublic) {
+                    HStack(spacing: 8) {
+                        Image(systemName: draftListIsPublic ? "globe" : "lock.fill")
+                            .foregroundColor(draftListIsPublic ? ColorTheme.accent : ColorTheme.subtext)
+                        Text(draftListIsPublic ? "Public list" : "Private list")
+                            .foregroundColor(ColorTheme.text)
+                    }
+                }
+                .tint(ColorTheme.accent)
+
+                Button {
+                    saveListMeta()
+                } label: {
+                    Text("Save")
+                        .font(.headline.weight(.bold))
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(RoundedRectangle(cornerRadius: 14).fill(ColorTheme.accent))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(18)
+            .frame(width: min(UIScreen.main.bounds.width - 28, 380))
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(ColorTheme.background)
+                    .overlay(RoundedRectangle(cornerRadius: 18).stroke(ColorTheme.separator, lineWidth: 1))
+            )
+            .padding(.horizontal, 14)
+        }
     }
 
     // MARK: - Content
@@ -301,14 +515,23 @@ struct ListDetailView: View {
                                     handleRankedGridDrop(onTargetId: it.id, providers: providers)
                                 }
 
-                            // Rank badge (persistent order)
-                            Text("\((it.order ?? 0) + 1)")
+                            if rankedBadgeShouldShow(for: it) {
+                                HStack(spacing: 6) {
+                                    if let decoration = rankedDecorationChoice(for: it) {
+                                        rankedDecorationIcon(decoration)
+                                            .frame(width: 12, height: 12)
+                                    }
+                                    if list.rankedShowNumbers {
+                                        Text("\((it.order ?? 0) + 1)")
+                                    }
+                                }
                                 .font(.caption2.weight(.bold))
                                 .padding(.horizontal, 6).padding(.vertical, 3)
                                 .background(Color.black.opacity(0.65))
                                 .foregroundColor(.white)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .padding(6)
+                            }
 
                             // Trash (delete from list) — visible only while editing in GRID
                             if rankedEditMode && isOwner {
@@ -355,47 +578,8 @@ struct ListDetailView: View {
     private var tieredWithPool: some View {
         let labels = normalizedTierLabels()
         let colors = normalizedTierColors()
+        let textColors = normalizedTierTextColors()
 
-        let laneHeight: CGFloat = 110
-        let coverSize = CGSize(width: 70, height: 93)
-        let leftColWidth: CGFloat = 64
-
-        // Lanes
-        let lanesSection = VStack(spacing: 10) {
-            ForEach(Array(labels.enumerated()), id: \.offset) { idx, label in
-                let laneItems = items
-                    .filter { ($0.tier ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == label }
-                    .sorted { ($0.order ?? 0) < ($1.order ?? 0) }
-
-                HStack(spacing: 8) {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(colorFromHex(colors[idx]))
-                        .overlay(
-                            Text(label.isEmpty ? defaultTierLabel(idx) : label)
-                                .font(.headline.weight(.bold))
-                                .foregroundColor(.white)
-                        )
-                        .frame(width: leftColWidth, height: laneHeight)
-
-                    TierLaneView(
-                        tierId: label,
-                        items: laneItems,
-                        allItems: $items,
-                        editMode: $editTierMode,
-                        draggingItemID: $draggingItemID,
-                        laneHeight: laneHeight,
-                        coverSize: coverSize
-                    )
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(ColorTheme.surface.opacity(0.35))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(ColorTheme.separator, lineWidth: 1))
-                    )
-                }
-            }
-        }
-
-        // Pool
         let poolItems: [UserListItem] = items
             .filter {
                 let t = ($0.tier ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -403,32 +587,80 @@ struct ListDetailView: View {
             }
             .sorted { ($0.addedAt ?? Date.distantPast) > ($1.addedAt ?? Date.distantPast) }
 
-        return ScrollView {
-            VStack(spacing: 16) {
-                lanesSection
+        return GeometryReader { proxy in
+            let availableHeight = proxy.size.height
+            let laneHeight = max(78.0, min(94.0, (availableHeight - 170.0) / 6.0))
+            let coverHeight = max(68.0, min(80.0, laneHeight - 16.0))
+            let coverWidth = coverHeight * 0.76
+            let coverSize = CGSize(width: coverWidth, height: coverHeight)
+            let leftColWidth = max(58.0, min(68.0, laneHeight * 0.68))
+            let laneSpacing = max(6.0, min(9.0, (availableHeight - 520.0) / 18.0 + 7.0))
 
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(spacing: 8) {
+                tieredHeroHeader
+
+                VStack(spacing: laneSpacing) {
+                    ForEach(Array(labels.enumerated()), id: \.offset) { idx, label in
+                        let laneItems = items
+                            .filter { ($0.tier ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == label }
+                            .sorted { ($0.order ?? 0) < ($1.order ?? 0) }
+
+                        HStack(spacing: 8) {
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(colorFromHex(colors[idx]))
+                                .overlay(
+                                    Text(label.isEmpty ? defaultTierLabel(idx) : label)
+                                        .font(.headline.weight(.bold))
+                                        .foregroundColor(colorFromHex(textColors[idx]))
+                                )
+                                .frame(width: leftColWidth, height: laneHeight)
+                                .onTapGesture {
+                                    guard isOwner && editTierMode else { return }
+                                    editingTierIndex = idx
+                                }
+
+                            TierLaneView(
+                                tierId: label,
+                                items: laneItems,
+                                allItems: $items,
+                                editMode: $editTierMode,
+                                draggingItemID: $draggingItemID,
+                                laneHeight: laneHeight,
+                                coverSize: coverSize,
+                                onMoveWithinTier: { itemId, direction in
+                                    moveTierItem(itemId, within: label, direction: direction)
+                                }
+                            )
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(ColorTheme.surface.opacity(0.35))
+                                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(ColorTheme.separator, lineWidth: 1))
+                            )
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Pool")
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(ColorTheme.subtext)
                         if editTierMode {
-                            Text("Drag from here into any tier")
-                                .font(.caption)
+                            Text(liftedPoolItemId == nil ? "Tap or drag a game into any tier" : "Lifted for quick dragging")
+                                .font(.caption2)
                                 .foregroundColor(ColorTheme.subtext)
                         }
                         Spacer()
                     }
                     TierPoolView(
-                        listId: list.id,
                         items: poolItems,
                         allItems: $items,
                         editMode: $editTierMode,
                         draggingItemID: $draggingItemID,
+                        liftedItemID: $liftedPoolItemId,
                         coverSize: coverSize,
                         onDelete: { deleteId in
-                            // Persisted delete
-                            deleteItems([deleteId])
+                            deleteItems([deleteId], reloadAfter: false)
                         }
                     )
                     .background(
@@ -437,10 +669,14 @@ struct ListDetailView: View {
                             .overlay(RoundedRectangle(cornerRadius: 10).stroke(ColorTheme.separator, lineWidth: 1))
                     )
                 }
-                .padding(.top, 6)
+                .padding(.top, 2)
+
+                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.top, 0)
+            .padding(.bottom, 6)
         }
     }
 
@@ -466,10 +702,18 @@ struct ListDetailView: View {
                 }
             }
             Spacer()
-            if showRank {
-                Text("\( (it.order ?? 0) + 1 )")
-                    .font(.headline.monospacedDigit().weight(.bold))
-                    .foregroundColor(ColorTheme.subtext)
+            if showRank, rankedBadgeShouldShow(for: it) {
+                HStack(spacing: 6) {
+                    if let decoration = rankedDecorationChoice(for: it) {
+                        rankedDecorationIcon(decoration)
+                            .frame(width: 14, height: 14)
+                    }
+                    if list.rankedShowNumbers {
+                        Text("\( (it.order ?? 0) + 1 )")
+                    }
+                }
+                .font(.headline.monospacedDigit().weight(.bold))
+                .foregroundColor(ColorTheme.subtext)
             }
         }
         .padding(.vertical, 6)
@@ -553,11 +797,42 @@ struct ListDetailView: View {
         deleteItems(ids)
     }
 
-    private func deleteItems(_ ids: [String]) {
+    private func deleteItems(_ ids: [String], reloadAfter: Bool = true) {
         guard !ids.isEmpty else { return }
+        items.removeAll { ids.contains($0.id) }
         ListsService.shared.removeItems(listId: list.id, itemIds: ids) {
-            loadItems()
+            currentListUpdatedAt = Timestamp(date: Date())
+            if reloadAfter {
+                loadItems()
+            }
         }
+    }
+
+    private func saveListMeta() {
+        let trimmed = draftListTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        currentListTitle = trimmed
+        currentListIsPublic = draftListIsPublic
+        currentListUpdatedAt = Timestamp(date: Date())
+        ListsService.shared.updateListMeta(
+            listId: list.id,
+            title: trimmed,
+            description: list.description,
+            isPublic: draftListIsPublic,
+            type: list.type,
+            tierLabels: list.tierLabels,
+            tierColors: list.tierColors,
+            tierTextColors: list.tierTextColors,
+            rankedShowNumbers: list.rankedShowNumbers,
+            rankedTopDecoration: list.rankedTopDecoration
+        )
+        showEditMetaSheet = false
+    }
+
+    private func relativeDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     // Ranked reordering (LIST layout)
@@ -571,6 +846,7 @@ struct ListDetailView: View {
         ListsService.shared.updateRanks(listId: list.id, updates: updates) {
             isSavingOrder = false
             loadItems()
+            currentListUpdatedAt = Timestamp(date: Date())
         }
     }
 
@@ -610,6 +886,7 @@ struct ListDetailView: View {
             rankedGridDirty = false
             rankedEditMode = false
             loadItems()
+            currentListUpdatedAt = Timestamp(date: Date())
         }
     }
 
@@ -624,13 +901,80 @@ struct ListDetailView: View {
 
         isSavingOrder = true
         ListsService.shared.updateTierPositions(listId: list.id, items: updates) {
-            isSavingOrder = false
-            editTierMode = false
-            loadItems()
+            ListsService.shared.updateListMeta(
+                listId: list.id,
+                title: currentListTitle,
+                description: list.description,
+                isPublic: currentListIsPublic,
+                type: list.type,
+                tierLabels: editableTierLabels,
+                tierColors: editableTierColors,
+                tierTextColors: editableTierTextColors
+            ) {
+                isSavingOrder = false
+                editTierMode = false
+                currentListUpdatedAt = Timestamp(date: Date())
+                SecretUnlockService.shared.evaluateTierListSecrets(
+                    userId: list.ownerId,
+                    isPublic: currentListIsPublic,
+                    tierLabels: editableTierLabels,
+                    tierColors: editableTierColors,
+                    itemTierLabels: items.compactMap(\.tier)
+                )
+                SecretUnlockService.shared.evaluateTierListSecretsForList(userId: list.ownerId, listId: list.id)
+                SecretUnlockService.shared.reevaluateListSecrets(userId: list.ownerId)
+                loadItems()
+            }
         }
     }
 
     // MARK: - Helpers
+
+    private func rankedDecorationChoice(for item: UserListItem) -> String? {
+        guard list.type == .ranked, (item.order ?? 0) == 0 else { return nil }
+        return list.rankedTopDecoration ?? "medal"
+    }
+
+    private func rankedBadgeShouldShow(for item: UserListItem) -> Bool {
+        guard list.type == .ranked else { return false }
+        return list.rankedShowNumbers || rankedDecorationChoice(for: item) != nil
+    }
+
+    @ViewBuilder
+    private func rankedDecorationIcon(_ choice: String) -> some View {
+        #if canImport(UIKit)
+        if UIImage(named: rankedDecorationAssetName(choice)) != nil {
+            Image(rankedDecorationAssetName(choice))
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
+        } else {
+            Image(systemName: rankedDecorationSystemName(choice))
+                .resizable()
+                .scaledToFit()
+        }
+        #else
+        Image(systemName: rankedDecorationSystemName(choice))
+            .resizable()
+            .scaledToFit()
+        #endif
+    }
+
+    private func rankedDecorationAssetName(_ choice: String) -> String {
+        switch choice {
+        case "trophy": return "trophy-solid-full"
+        case "award": return "award-solid-full"
+        default: return "medal-solid-full"
+        }
+    }
+
+    private func rankedDecorationSystemName(_ choice: String) -> String {
+        switch choice {
+        case "trophy": return "trophy.fill"
+        case "award": return "rosette"
+        default: return "medal.fill"
+        }
+    }
 
     private func defaultTierLabel(_ idx: Int) -> String {
         let defaults = ["S","A","B","C","D"]
@@ -640,7 +984,7 @@ struct ListDetailView: View {
     private func normalizedTierLabels() -> [String] {
         let defaults = ["S","A","B","C","D"]
         guard list.type == .tiered else { return defaults }
-        let labels = list.tierLabels ?? defaults
+        let labels = editableTierLabels.isEmpty ? (list.tierLabels ?? defaults) : editableTierLabels
         var result = Array(labels.prefix(5))
         while result.count < 5 { result.append(defaults[result.count]) }
         return result.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -649,7 +993,16 @@ struct ListDetailView: View {
     private func normalizedTierColors() -> [String] {
         let defaults = ["#E74C3C","#E67E22","#F1C40F","#2ECC71","#3498DB"]
         guard list.type == .tiered else { return defaults }
-        let colors = list.tierColors ?? defaults
+        let colors = editableTierColors.isEmpty ? (list.tierColors ?? defaults) : editableTierColors
+        var result = Array(colors.prefix(5))
+        while result.count < 5 { result.append(defaults[result.count]) }
+        return result
+    }
+
+    private func normalizedTierTextColors() -> [String] {
+        let defaults = ["#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF","#FFFFFF"]
+        guard list.type == .tiered else { return defaults }
+        let colors = editableTierTextColors.isEmpty ? (list.tierTextColors ?? defaults) : editableTierTextColors
         var result = Array(colors.prefix(5))
         while result.count < 5 { result.append(defaults[result.count]) }
         return result
@@ -666,6 +1019,129 @@ struct ListDetailView: View {
         let g = Double((num >> 8) & 0xFF) / 255.0
         let b = Double(num & 0xFF) / 255.0
         return Color(red: r, green: g, blue: b)
+    }
+
+    private func hexString(from color: Color) -> String {
+        #if canImport(UIKit)
+        let uiColor = UIColor(color)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        guard uiColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+            return "#FFFFFF"
+        }
+        return String(format: "#%02X%02X%02X",
+                      Int(red * 255),
+                      Int(green * 255),
+                      Int(blue * 255))
+        #else
+        return "#FFFFFF"
+        #endif
+    }
+
+    private func seedTierEditorStateIfNeeded() {
+        if editableTierLabels.isEmpty { editableTierLabels = normalizedTierLabels() }
+        if editableTierColors.isEmpty { editableTierColors = normalizedTierColors() }
+        if editableTierTextColors.isEmpty { editableTierTextColors = normalizedTierTextColors() }
+    }
+
+    private func moveTierItem(_ itemId: String, within tierLabel: String, direction: Int) {
+        let laneItems = items
+            .filter { ($0.tier ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == tierLabel }
+            .sorted { ($0.order ?? 0) < ($1.order ?? 0) }
+        guard let currentIndex = laneItems.firstIndex(where: { $0.id == itemId }) else { return }
+        let destination = currentIndex + direction
+        guard laneItems.indices.contains(destination) else { return }
+
+        let movingId = laneItems[currentIndex].id
+        let targetId = laneItems[destination].id
+        guard
+            let movingIndex = items.firstIndex(where: { $0.id == movingId }),
+            let targetIndex = items.firstIndex(where: { $0.id == targetId })
+        else { return }
+
+        let movingOrder = items[movingIndex].order ?? currentIndex
+        let targetOrder = items[targetIndex].order ?? destination
+        items[movingIndex].order = targetOrder
+        items[targetIndex].order = movingOrder
+    }
+
+    @ViewBuilder
+    private func tierHeaderEditorOverlay(index: Int) -> some View {
+        let title = editableTierLabels[safe: index] ?? defaultTierLabel(index)
+        let fillColor = colorFromHex(editableTierColors[safe: index] ?? "#3A3A3A")
+        let textColor = colorFromHex(editableTierTextColors[safe: index] ?? "#FFFFFF")
+        ZStack {
+            OverlayBackdrop()
+                .ignoresSafeArea()
+                .onTapGesture { editingTierIndex = nil }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Edit Tier Header")
+                        .font(.headline.weight(.bold))
+                        .foregroundColor(ColorTheme.text)
+                    Spacer()
+                    Button("Done") { editingTierIndex = nil }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(ColorTheme.accent)
+                }
+
+                TextField("Tier label", text: Binding(
+                    get: { editableTierLabels[safe: index] ?? defaultTierLabel(index) },
+                    set: { value in
+                        seedTierEditorStateIfNeeded()
+                        editableTierLabels[index] = String(value.prefix(6))
+                    }
+                ))
+                .textInputAutocapitalization(.characters)
+                .disableAutocorrection(true)
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 10).fill(ColorTheme.surface))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Block Color")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(ColorTheme.subtext)
+                    ColorPicker("", selection: Binding(
+                        get: { fillColor },
+                        set: { newColor in
+                            seedTierEditorStateIfNeeded()
+                            editableTierColors[index] = hexString(from: newColor)
+                        }
+                    ), supportsOpacity: false)
+                    .labelsHidden()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Text Color")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(ColorTheme.subtext)
+                    ColorPicker("", selection: Binding(
+                        get: { textColor },
+                        set: { newColor in
+                            seedTierEditorStateIfNeeded()
+                            editableTierTextColors[index] = hexString(from: newColor)
+                        }
+                    ), supportsOpacity: false)
+                    .labelsHidden()
+                }
+
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(fillColor)
+                    .frame(height: 64)
+                    .overlay(
+                        Text(title.isEmpty ? defaultTierLabel(index) : title)
+                            .font(.title3.weight(.bold))
+                            .foregroundColor(textColor)
+                    )
+            }
+            .padding(16)
+            .frame(width: min(UIScreen.main.bounds.width - 32, 360))
+            .background(RoundedRectangle(cornerRadius: 18).fill(ColorTheme.background))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(ColorTheme.separator, lineWidth: 1))
+        }
     }
 
     // Handle a drop onto a ranked GRID cell (targetId may be nil for end)
@@ -699,6 +1175,11 @@ struct ListDetailView: View {
 // MARK: - Tier Lane
 
 private struct TierLaneView: View {
+    enum TierMoveDirection {
+        case left
+        case right
+    }
+
     let tierId: String?
     var items: [UserListItem]
 
@@ -708,34 +1189,62 @@ private struct TierLaneView: View {
 
     let laneHeight: CGFloat
     let coverSize: CGSize
+    let onMoveWithinTier: (String, Int) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(items.sorted(by: { ($0.order ?? 0) < ($1.order ?? 0) }), id: \.id) { it in
-                    ZStack(alignment: .topLeading) {
-                        CoverFetchView(item: it, cornerRadius: 10, width: coverSize.width, height: coverSize.height)
-                            .frame(width: coverSize.width, height: coverSize.height)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke((editMode && draggingItemID == it.id) ? ColorTheme.accent : Color.clear, lineWidth: 2)
-                            )
-                            .onDragIf(editMode, item: it.id) { draggingItemID = it.id }
+                    VStack(spacing: 4) {
+                        ZStack(alignment: .topLeading) {
+                            CoverFetchView(item: it, cornerRadius: 10, width: coverSize.width, height: coverSize.height)
+                                .frame(width: coverSize.width, height: coverSize.height)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke((editMode && draggingItemID == it.id) ? ColorTheme.accent : Color.clear, lineWidth: 2)
+                                )
+                                .onDragIf(editMode, item: it.id) { draggingItemID = it.id }
 
-                        // Move to Pool (X) — visible only in edit mode
-                        if editMode {
-                            Button {
-                                moveItemToPool(withId: it.id)
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .padding(6)
-                                    .background(Color.black.opacity(0.6))
-                                    .clipShape(Circle())
-                                    .foregroundColor(.white)
-                                    .accessibilityLabel("Move to Pool")
+                            if editMode {
+                                Button {
+                                    moveItemToPool(withId: it.id)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .padding(6)
+                                        .background(Color.black.opacity(0.6))
+                                        .clipShape(Circle())
+                                        .foregroundColor(.white)
+                                        .accessibilityLabel("Move to Pool")
+                                }
+                                .padding(4)
                             }
-                            .padding(4)
+                        }
+
+                        if editMode {
+                            HStack(spacing: 6) {
+                                Button {
+                                    onMoveWithinTier(it.id, -1)
+                                } label: {
+                                    Image(systemName: "chevron.left")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundColor(ColorTheme.text)
+                                        .frame(width: 22, height: 18)
+                                        .background(RoundedRectangle(cornerRadius: 6).fill(ColorTheme.surface))
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    onMoveWithinTier(it.id, 1)
+                                } label: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundColor(ColorTheme.text)
+                                        .frame(width: 22, height: 18)
+                                        .background(RoundedRectangle(cornerRadius: 6).fill(ColorTheme.surface))
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                 }
@@ -801,51 +1310,57 @@ private struct TierLaneView: View {
 // MARK: - Tier Pool
 
 private struct TierPoolView: View {
-    let listId: String
     var items: [UserListItem]
 
     @Binding var allItems: [UserListItem]
     @Binding var editMode: Bool
     @Binding var draggingItemID: String?
+    @Binding var liftedItemID: String?
 
     let coverSize: CGSize
     let onDelete: (String) -> Void
 
-    private var grid: [GridItem] {
-        [GridItem(.adaptive(minimum: coverSize.width), spacing: 8)]
-    }
-
     var body: some View {
-        LazyVGrid(columns: grid, alignment: .leading, spacing: 8) {
-            ForEach(items, id: \.id) { it in
-                ZStack(alignment: .topLeading) {
-                    CoverFetchView(item: it, cornerRadius: 10, width: coverSize.width, height: coverSize.height)
-                        .frame(width: coverSize.width, height: coverSize.height)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke((editMode && draggingItemID == it.id) ? ColorTheme.accent : Color.clear, lineWidth: 2)
-                        )
-                        .onDragIf(editMode, item: it.id) { draggingItemID = it.id }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(items, id: \.id) { it in
+                    ZStack(alignment: .topLeading) {
+                        CoverFetchView(item: it, cornerRadius: 10, width: coverSize.width, height: coverSize.height)
+                            .frame(width: coverSize.width, height: coverSize.height)
+                            .scaleEffect(liftedItemID == it.id ? 1.16 : 1.0)
+                            .shadow(color: liftedItemID == it.id ? ColorTheme.accent.opacity(0.28) : .clear, radius: 10, x: 0, y: 4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke((editMode && (draggingItemID == it.id || liftedItemID == it.id)) ? ColorTheme.accent : Color.clear, lineWidth: 2)
+                            )
+                            .onDragIf(editMode, item: it.id) {
+                                draggingItemID = it.id
+                                liftedItemID = it.id
+                            }
+                            .onTapGesture {
+                                guard editMode else { return }
+                                liftedItemID = (liftedItemID == it.id) ? nil : it.id
+                            }
 
-                    // Trash (delete from list) — visible only in edit mode
-                    if editMode {
-                        Button {
-                            onDelete(it.id)
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.system(size: 12, weight: .bold))
-                                .padding(6)
-                                .background(Color.black.opacity(0.65))
-                                .clipShape(Circle())
-                                .foregroundColor(.white)
-                                .accessibilityLabel("Remove from List")
+                        if editMode {
+                            Button {
+                                onDelete(it.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .padding(6)
+                                    .background(Color.black.opacity(0.65))
+                                    .clipShape(Circle())
+                                    .foregroundColor(.white)
+                                    .accessibilityLabel("Remove from List")
+                            }
+                            .padding(4)
                         }
-                        .padding(4)
                     }
                 }
             }
+            .padding(8)
         }
-        .padding(8)
         .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
             handleDropToPool(providers)
         }
@@ -877,6 +1392,7 @@ private struct TierPoolView: View {
                             allItems[idx] = it
                         }
                         draggingItemID = nil
+                        liftedItemID = nil
                     }
                 }
                 return true

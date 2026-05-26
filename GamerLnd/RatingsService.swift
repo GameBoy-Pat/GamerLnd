@@ -30,8 +30,6 @@ final class RatingsService {
         let query = db.collection("game_logs")
             .whereField("game_id", isEqualTo: gameId)
 
-        os_log("RatingsService: attaching listener for game_id=%d", log: .default, type: .debug, gameId)
-
         let listener = query.addSnapshotListener { snapshot, error in
             if let error = error {
                 os_log("RatingsService error: %@", log: .default, type: .error, error.localizedDescription)

@@ -13,17 +13,18 @@ struct Toast: Identifiable, Equatable {
 
 struct ToastView: View {
     let toast: Toast
+    var bottomInset: CGFloat = 0
 
     private var bg: Color {
         switch toast.kind {
-        case .success: return Color.green.opacity(0.22)
+        case .success: return ColorTheme.accent.opacity(0.22)
         case .error:   return Color.red.opacity(0.22)
         case .info:    return Color.gray.opacity(0.22)
         }
     }
     private var stroke: Color {
         switch toast.kind {
-        case .success: return Color.green.opacity(0.55)
+        case .success: return ColorTheme.accent.opacity(0.55)
         case .error:   return Color.red.opacity(0.55)
         case .info:    return Color.gray.opacity(0.55)
         }
@@ -50,7 +51,7 @@ struct ToastView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(stroke, lineWidth: 1))
         )
         .padding(.horizontal, 16)
-        .padding(.bottom, 24)
+        .padding(.bottom, max(24, bottomInset + 78))
     }
 }
 
@@ -61,7 +62,7 @@ struct ToastModifier: ViewModifier {
         ZStack(alignment: .bottom) {
             content
             if let t = toast {
-                ToastView(toast: t)
+                ToastView(toast: t, bottomInset: 0)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .onAppear {
                         DispatchQueue.main.asyncAfter(deadline: .now() + t.duration) {
@@ -70,7 +71,6 @@ struct ToastModifier: ViewModifier {
                     }
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.8, blendDuration: 0.2), value: toast)
     }
 }
 

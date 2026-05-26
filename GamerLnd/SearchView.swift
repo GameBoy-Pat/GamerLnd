@@ -74,6 +74,8 @@ struct SearchView: View {
     @State private var gamerLndAvg: [Int: Double] = [:]
     @State private var gamerLndCount: [Int: Int] = [:]   // # of ratings
     @State private var reviewCountCache: [Int: Int] = [:] // # of non-empty reviews
+    @State private var selectedGameOverlay: Game? = nil
+    @State private var suppressNextResultSelection: Bool = false
 
     // Sheets / Menus
     @State private var showingFilters: Bool = false
@@ -91,7 +93,7 @@ struct SearchView: View {
             VStack(spacing: 8) {
                 HStack(spacing: 10) {
                     ZStack {
-                        TextField("Search…", text: $query, onCommit: { performSearch(reset: true) })
+                        TextField("Search…", text: $query, onCommit: { performSearch(reset: true, userInitiated: true) })
                             .textInputAutocapitalization(.none)
                             .disableAutocorrection(true)
                             .padding(10)
@@ -115,7 +117,7 @@ struct SearchView: View {
 
                     Button(action: {
                         Haptics.tap()
-                        performSearch(reset: true)
+                        performSearch(reset: true, userInitiated: true)
                     }) {
                         Image(systemName: "magnifyingglass")
                             .font(.headline.weight(.semibold))
@@ -178,10 +180,10 @@ struct SearchView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         if let y = selectedYear {
-                            chip("Year: \(y)") { selectedYear = nil; performSearch(reset: true) }
+                            chip("Year: \(y)") { selectedYear = nil; performSearch(reset: true, userInitiated: true) }
                         }
                         if let g = selectedGenre {
-                            chip("Genre: \(g)") { selectedGenre = nil; performSearch(reset: true) }
+                            chip("Genre: \(g)") { selectedGenre = nil; performSearch(reset: true, userInitiated: true) }
                         }
                         if let p = selectedPlatform {
                             chip("Platform: \(p)") { selectedPlatform = nil; applyLocalFiltersAndSort() }
@@ -209,13 +211,16 @@ struct SearchView: View {
                         }
 
                         ForEach(results, id: \.id) { game in
-                            NavigationLink(
-                                destination: GameDetailView(game: game)
-                            ) {
-                                resultRow(game)
-                                    .padding(.horizontal, 16)
-                            }
-                            .buttonStyle(.plain)
+                            resultRow(game)
+                                .padding(.horizontal, 16)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if suppressNextResultSelection {
+                                        suppressNextResultSelection = false
+                                        return
+                                    }
+                                    selectedGameOverlay = game
+                                }
                             .onAppear {
                                 // When sorting by GamerLnd, pull averages as rows come into view.
                                 if gamerLndAvg[game.id] == nil {
@@ -253,34 +258,22 @@ struct SearchView: View {
                     }
                 }
 
-                // Idle overlay (centered)
-                if showIdle {
-                    VStack(spacing: 16) {
-                        Text("Search for Games")
-                            .font(.title2.weight(.semibold))
-                            .foregroundColor(ColorTheme.text)
-
-                        if !currentQuote.isEmpty {
-                            Text(currentQuote)
-                                .italic() // italicized, no quotes
-                                .font(.footnote)
-                                .foregroundColor(ColorTheme.subtext)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 24)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
             }
         }
         .background(ColorTheme.background.ignoresSafeArea())
+        .overlay {
+            if let game = selectedGameOverlay {
+                GameLogOverlayHost(editor: game) {
+                    selectedGameOverlay = nil
+                }
+            }
+        }
         .navigationTitle("")
         .toolbar {
             ToolbarItem(placement: .principal) { EmptyView() }
         }
         .sheet(isPresented: $showingFilters) { FiltersSheet }
         .onAppear {
-            currentQuote = idleQuotes.randomElement() ?? ""
             AnalyticsService.shared.screen("search_games")
         }
         .onChange(of: query) { _, newValue in
@@ -298,7 +291,7 @@ struct SearchView: View {
             AnalyticsService.shared.trackSearchTyping(query: newValue)
 
             // Start a new debounced task (350ms)
-            let task = DispatchWorkItem { performSearch(reset: true) }
+            let task = DispatchWorkItem { performSearch(reset: true, userInitiated: false) }
             debounceTask = task
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: task)
         }
@@ -308,6 +301,13 @@ struct SearchView: View {
         }
         .onChange(of: selectedPlatform) { _, _ in
             applyLocalFiltersAndSort()
+        }
+        .onChange(of: selectedGameOverlay) { _, newValue in
+            NotificationCenter.default.post(
+                name: .nestedOverlayVisibilityChanged,
+                object: nil,
+                userInfo: ["visible": newValue != nil]
+            )
         }
     }
 
@@ -368,7 +368,7 @@ struct SearchView: View {
                     Button("Done") {
                         Haptics.tap()
                         showingFilters = false
-                        performSearch(reset: true) // year/genre affect the server query
+                        performSearch(reset: true, userInitiated: true) // year/genre affect the server query
                     }
                 }
             }
@@ -414,13 +414,13 @@ struct SearchView: View {
                     .lineLimit(2)
 
                 if let year = game.computedReleaseYear {
-                    // ensure no commas (just in case of a bad formatter elsewhere)
-                    Text("\(year)")
+                    Text(verbatim: String(year))
                         .font(.caption)
                         .foregroundColor(ColorTheme.subtext)
                 }
 
-                if let plats = game.platforms?.map({ $0.name }).prefix(4), !plats.isEmpty {
+                let plats = game.prioritizedPlatformNames(prefix: 4)
+                if !plats.isEmpty {
                     Text(plats.joined(separator: ", "))
                         .font(.caption)
                         .foregroundColor(ColorTheme.subtext)
@@ -464,7 +464,7 @@ struct SearchView: View {
         )
         // Bottom-right GamerLnd badge
         .overlay(alignment: .bottomTrailing) {
-            gamerLndBadge(avg: ratingAvg, count: ratingCnt)
+            gamerLndBadge(for: game, avg: ratingAvg, count: ratingCnt)
                 .padding(10)
         }
         .onAppear {
@@ -473,32 +473,32 @@ struct SearchView: View {
         }
     }
 
-    private func gamerLndBadge(avg: Double?, count: Int) -> some View {
+    private func gamerLndBadge(for game: Game, avg: Double?, count: Int) -> some View {
         Group {
             if let avg = avg, count > 0 {
-                HStack(spacing: 8) {
-                    Text("GamerLnd Rating")
-                        .font(.caption2)
-                        .foregroundColor(ColorTheme.subtext)
-                    Image(systemName: "heart.fill")
-                        .foregroundColor(ColorTheme.highlight)
-                    Text(String(format: "%.1f", avg))
-                        .font(.footnote.weight(.semibold))
-                        .foregroundColor(ColorTheme.highlight)
+                Button {
+                    suppressNextResultSelection = true
+                    NotificationCenter.default.post(
+                        name: .openRatingsOverlayRequested,
+                        object: nil,
+                        userInfo: [
+                            "game_id": game.id,
+                            "game_name": game.name,
+                            "avg": avg,
+                            "cover_image_id": game.cover?.imageId as Any
+                        ]
+                    )
+                } label: {
+                    AverageHeartBadge(value: avg, size: 16)
                 }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 8).fill(ColorTheme.surface))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(ColorTheme.separator, lineWidth: 1))
+                .buttonStyle(.plain)
             } else {
-                HStack(spacing: 8) {
-                    Text("GamerLnd Rating")
-                        .font(.caption2)
-                        .foregroundColor(ColorTheme.subtext)
-                    Text("Be the first to rate!")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundColor(ColorTheme.accent)
-                }
-                .padding(.horizontal, 10).padding(.vertical, 6)
+                PixelHeartIcon(
+                    color: ColorTheme.subtext,
+                    size: 16,
+                    empty: true
+                )
+                    .padding(6)
                 .background(RoundedRectangle(cornerRadius: 8).fill(ColorTheme.surface))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(ColorTheme.separator, lineWidth: 1))
             }
@@ -507,7 +507,7 @@ struct SearchView: View {
 
     // MARK: - Actions
 
-    private func performSearch(reset: Bool) {
+    private func performSearch(reset: Bool, userInitiated: Bool = false) {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
 
@@ -529,6 +529,9 @@ struct SearchView: View {
             nextOffset = 0
             results = []
             canLoadMore = false
+            if userInitiated {
+                RewardService.shared.recordSearch(query: q)
+            }
         }
 
         errorText = ""
@@ -584,7 +587,7 @@ struct SearchView: View {
 
     private func loadMore() {
         guard !isLoading, canLoadMore else { return }
-        performSearch(reset: false)
+        performSearch(reset: false, userInitiated: false)
     }
 
     private func applyLocalFiltersAndSort() {

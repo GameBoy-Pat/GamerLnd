@@ -20,43 +20,83 @@ final class InteractionService {
 
     // MARK: - Likes
 
-    /// Toggle like for a log. Creates/deletes /review_likes doc.
-    /// - Parameters:
-    ///   - log: target GameLog
-    ///   - currentlyLiked: pass true if the caller's UI thinks the user has liked it
-    ///   - completion: called on main after the write succeeds (UI should update)
-    func toggleLike(log: GameLog,
-                    currentlyLiked: Bool,
-                    completion: @escaping () -> Void) {
+    /// Set like state for a log using a deterministic doc id so there are only two real states:
+    /// liked by the current user, or not liked by the current user.
+    func setLike(log: GameLog,
+                 shouldLike: Bool,
+                 completion: @escaping (Result<Bool, Error>) -> Void) {
         guard let uid = Auth.auth().currentUser?.uid else { return }
         let likeId = "\(uid)_\(log.id)"
         let ref = db.collection("review_likes").document(likeId)
 
-        if currentlyLiked {
-            // UNLIKE: just delete the like document
-            ref.delete { _ in
-                DispatchQueue.main.async { completion() }
-            }
-        } else {
-            // LIKE: write the document and create a notification to the log owner (if not self)
-            let payload: [String: Any] = [
-                "id": likeId,
-                "user_id": uid,
-                "log_id": log.id,
-                "created_at": Timestamp(date: Date())
-            ]
-            ref.setData(payload, merge: false) { _ in
-                // Send notification if liking someone else's log
+        if !shouldLike {
+            ref.delete { error in
+                if let error {
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                    return
+                }
                 if uid != log.userId {
-                    NotificationService.shared.create(
+                    NotificationService.shared.delete(
                         toUserId: log.userId,
                         relatedLogId: log.id,
                         type: .like
                     )
                 }
-                DispatchQueue.main.async { completion() }
+                DispatchQueue.main.async { completion(.success(false)) }
             }
+            return
         }
+
+        let payload: [String: Any] = [
+            "id": likeId,
+            "user_id": uid,
+            "log_id": log.id,
+            "created_at": Timestamp(date: Date())
+        ]
+        var enrichedPayload = payload
+        if let displayName = Auth.auth().currentUser?.displayName, !displayName.isEmpty {
+            enrichedPayload["author_name"] = displayName
+        } else if let email = Auth.auth().currentUser?.email, !email.isEmpty {
+            enrichedPayload["author_name"] = email
+        }
+        if let avatarURL = Auth.auth().currentUser?.photoURL?.absoluteString, !avatarURL.isEmpty {
+            enrichedPayload["author_avatar_url"] = avatarURL
+        }
+
+        ref.setData(enrichedPayload, merge: false) { error in
+            if let error {
+                DispatchQueue.main.async { completion(.failure(error)) }
+                return
+            }
+            if uid != log.userId {
+                NotificationService.shared.create(
+                    toUserId: log.userId,
+                    relatedLogId: log.id,
+                    type: .like
+                )
+            }
+            RewardService.shared.recordGamificationEvent(
+                RewardService.GamificationEvent(
+                    userId: uid,
+                    kind: .likeLog,
+                    gameId: log.gameId,
+                    releaseYear: nil,
+                    reviewLength: nil,
+                    ratingValue: nil,
+                    searchQuery: nil,
+                    sessionId: RewardService.activeSessionId,
+                    occurredAt: Date()
+                )
+            )
+            DispatchQueue.main.async { completion(.success(true)) }
+        }
+    }
+
+    /// Toggle like for callers that already know the current UI state.
+    func toggleLike(log: GameLog,
+                    currentlyLiked: Bool,
+                    completion: @escaping (Result<Bool, Error>) -> Void) {
+        setLike(log: log, shouldLike: !currentlyLiked, completion: completion)
     }
 
     // MARK: - Follows
@@ -100,6 +140,19 @@ final class InteractionService {
             ]
             ref.setData(payload, merge: false) { _ in
                 // NOTE: We do NOT send a "follow" notification due to security rules (allowed: like/comment).
+                RewardService.shared.recordGamificationEvent(
+                    RewardService.GamificationEvent(
+                        userId: me,
+                        kind: .followUser,
+                        gameId: nil,
+                        releaseYear: nil,
+                        reviewLength: nil,
+                        ratingValue: nil,
+                        searchQuery: nil,
+                        sessionId: RewardService.activeSessionId,
+                        occurredAt: Date()
+                    )
+                )
                 DispatchQueue.main.async { completion(true) }
             }
         }
