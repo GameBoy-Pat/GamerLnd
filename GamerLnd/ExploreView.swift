@@ -2234,7 +2234,7 @@ private struct UserRowSkeleton: View {
                             id: d.documentID,
                             username: uname,
                             displayName: displayName,
-                            avatarUrl: data["avatar_url"] as? String,
+                            avatarUrl: UserRecordAvatarResolver.url(from: data),
                             isTrustedGamer: true
                         )
                     }
@@ -2261,7 +2261,7 @@ private struct UserRowSkeleton: View {
                         id: doc.documentID,
                         username: uname,
                         displayName: displayName,
-                        avatarUrl: data["avatar_url"] as? String,
+                        avatarUrl: UserRecordAvatarResolver.url(from: data),
                         isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false
                     )
 
@@ -2344,7 +2344,7 @@ private struct UserRowSkeleton: View {
                             id: d.documentID,
                             username: uname,
                             displayName: data["display_name"] as? String,
-                            avatarUrl: data["avatar_url"] as? String,
+                            avatarUrl: UserRecordAvatarResolver.url(from: data),
                             isTrustedGamer: data["is_trusted_gamer"] as? Bool ?? false
                         )
                     }
@@ -2948,7 +2948,7 @@ private struct UserRowSkeleton: View {
                 let id = (data["id"] as? String) ?? d.documentID
                 let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                 let displayName = data["display_name"] as? String
-                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
             }
             mergeUsersAndApply(newUsers)
             // Also try matching by display name for broader results.
@@ -2978,7 +2978,7 @@ private struct UserRowSkeleton: View {
                 let id = (data["id"] as? String) ?? d.documentID
                 let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                 let displayName = data["display_name"] as? String
-                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
             }
             self.mergeUsersAndApply(newUsers)
             // If no results, fallback: broaden by first 2 letters and filter locally
@@ -2995,7 +2995,7 @@ private struct UserRowSkeleton: View {
                         let id = (data["id"] as? String) ?? d.documentID
                         let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                         let displayName = data["display_name"] as? String
-                        return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                        return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
                     }
                     let filtered = fallbackUsers.filter { u in
                         let hay = ((u.displayName ?? u.username)).lowercased()
@@ -3020,7 +3020,7 @@ private struct UserRowSkeleton: View {
                     let id = (data["id"] as? String) ?? d.documentID
                     let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                     let displayName = data["display_name"] as? String
-                    return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                    return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
                 }
                 let filtered = fallbackUsers.filter { u in
                     let hay = ((u.displayName ?? u.username)).lowercased()
@@ -3046,7 +3046,7 @@ private struct UserRowSkeleton: View {
                 let id = (data["id"] as? String) ?? d.documentID
                 let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                 let displayName = data["display_name"] as? String
-                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
             }
             self.mergeUsersAndApply(newUsers)
             if self.userResults.isEmpty && lower.count >= 2 {
@@ -3062,7 +3062,7 @@ private struct UserRowSkeleton: View {
                         let id = (data["id"] as? String) ?? d.documentID
                         let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                         let displayName = data["display_name"] as? String
-                        return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                        return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
                     }
                     let filtered = fallbackUsers.filter { u in
                         let hay = ((u.displayName ?? u.username)).lowercased()
@@ -3096,7 +3096,7 @@ private struct UserRowSkeleton: View {
                 let id = (data["id"] as? String) ?? d.documentID
                 let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                 let displayName = data["display_name"] as? String
-                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: data["avatar_url"] as? String, isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
+                return GamerLnd.UserLite(id: id, username: uname, displayName: displayName, avatarUrl: UserRecordAvatarResolver.url(from: data), isTrustedGamer: (data["is_trusted_gamer"] as? Bool) ?? false)
             }
             mergeUsersAndApply(newUsers)
         }

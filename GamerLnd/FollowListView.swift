@@ -128,7 +128,7 @@ struct FollowListView: View {
                         let username = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
                         let displayName = (data["display_name"] as? String)
                         let handle = (data["handle"] as? String)
-                        let avatar = data["avatar_url"] as? String
+                        let avatar = UserRecordAvatarResolver.url(from: data)
                         results.append(
                             UserProfileBrief(
                                 id: id,

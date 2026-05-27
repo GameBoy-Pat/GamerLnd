@@ -9,7 +9,6 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
-import FirebaseStorage
 import PhotosUI
 
 struct ProfileEditView: View {
@@ -29,8 +28,6 @@ struct ProfileEditView: View {
     @State private var isUploading: Bool = false
 
     private let db = Firestore.firestore()
-    private let storage = Storage.storage()
-
     var body: some View {
         NavigationView {
             Form {
@@ -87,6 +84,12 @@ struct ProfileEditView: View {
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
+                        .onChange(of: username) { _, newValue in
+                            let sanitized = ProfileIdentityValidator.sanitizedHandleInput(newValue)
+                            if sanitized != newValue {
+                                username = sanitized
+                            }
+                        }
                     TextField("Bio", text: $bio, axis: .vertical)
                         .lineLimit(3...6)
                 }
@@ -135,20 +138,23 @@ struct ProfileEditView: View {
 
     private func save() {
         isSaving = true; errorText = ""
-        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedUsername = ProfileIdentityValidator.sanitizedHandleInput(username)
 
-        if ContentModeration.containsForbiddenProfileText(trimmedUsername) {
-            errorText = "Usernames cannot include profanity."
+        if let error = ProfileIdentityValidator.handleError(trimmedUsername) {
+            errorText = error
             isSaving = false
             return
         }
 
         var patch: [String: Any] = [
             "username": trimmedUsername,
+            "username_lower": trimmedUsername,
+            "handle": trimmedUsername,
             "bio": bio
         ]
         if !avatarURL.isEmpty {
             patch["avatar_url"] = avatarURL
+            patch["profile_picture_url"] = avatarURL
         }
 
         db.collection("users").document(userId).setData(patch, merge: true) { err in
@@ -183,36 +189,17 @@ struct ProfileEditView: View {
 
     private func uploadAvatar(data: Data) async {
         await MainActor.run { isUploading = true; errorText = "" }
-        // Compress to a reasonable size
-        let maxKB = 500
-        let jpegData: Data
-        if let ui = UIImage(data: data),
-           let compressed = ui.jpegData(compressionQuality: 0.8),
-           compressed.count <= maxKB * 1024 {
-            jpegData = compressed
-        } else if let ui = UIImage(data: data),
-                  let compressed = ui.jpegData(compressionQuality: 0.65) {
-            jpegData = compressed
-        } else {
-            jpegData = data
-        }
-
-        let ref = storage.reference().child("avatars/\(userId).jpg")
-        do {
-            _ = try await ref.putDataAsync(jpegData, metadata: {
-                let meta = StorageMetadata()
-                meta.contentType = "image/jpeg"
-                return meta
-            }())
-            let url = try await ref.downloadURL()
-            await MainActor.run {
-                self.avatarURL = url.absoluteString
-                self.isUploading = false
-            }
-        } catch {
-            await MainActor.run {
-                self.errorText = error.localizedDescription
-                self.isUploading = false
+        await withCheckedContinuation { continuation in
+            AvatarUploadService.upload(userId: userId, imageData: data) { url, error in
+                Task { @MainActor in
+                    if let url = url {
+                        self.avatarURL = url
+                    } else if let error = error {
+                        self.errorText = error.localizedDescription
+                    }
+                    self.isUploading = false
+                    continuation.resume()
+                }
             }
         }
     }

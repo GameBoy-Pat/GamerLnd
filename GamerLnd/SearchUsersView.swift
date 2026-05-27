@@ -648,7 +648,7 @@ struct SearchUsersView: View {
         let id = (data["id"] as? String) ?? docId
         let username = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
         let displayName = data["display_name"] as? String
-        let avatar = data["avatar_url"] as? String
+        let avatar = UserRecordAvatarResolver.url(from: data)
         return UserLite(id: id, username: username, displayName: displayName, avatarUrl: avatar)
     }
 }

@@ -271,28 +271,82 @@ final class AuthService: NSObject, ASAuthorizationControllerDelegate, ASAuthoriz
                 }
                 return "user_" + uid.prefix(6)
             }()
-            let safeUsername: String = ContentModeration.containsForbiddenProfileText(derivedUsername)
-                ? "user_" + uid.prefix(6)
-                : derivedUsername
+            let fallbackHandleBase = "user_" + String(uid.prefix(6)).lowercased()
+            let normalizedDisplayName = {
+                let candidate = ProfileIdentityValidator.normalizedDisplayName(derivedUsername)
+                if ProfileIdentityValidator.displayNameError(candidate) == nil {
+                    return candidate
+                }
+                return fallbackHandleBase
+            }()
+            let desiredHandleBase = {
+                let candidate = ProfileIdentityValidator.sanitizedHandleInput(derivedUsername)
+                if ProfileIdentityValidator.handleError(candidate) == nil {
+                    return candidate
+                }
+                return fallbackHandleBase
+            }()
 
-            let payload: [String: Any] = [
-                "id": uid,
-                "email": user.email ?? "",
-                "display_name": safeUsername,
-                "display_name_lower": safeUsername.lowercased(),
-                "username": safeUsername.lowercased(),
-                "username_lower": safeUsername.lowercased(),
-                "handle": safeUsername.lowercased(),
-                "search_prefix": UserProfile.searchPrefixes(username: safeUsername, handle: safeUsername.lowercased()),
-                "bio": "",
-                "profile_picture_url": "",
-                "created_at": Timestamp(date: Date())
-            ]
-            docRef.setData(payload) { err in
-                if let err = err { completion(.failure(err)) }
-                else { completion(.success(())) }
+            self.makeUniqueHandle(base: desiredHandleBase, excludingUserId: uid) { result in
+                switch result {
+                case .failure(let error):
+                    completion(.failure(error))
+                case .success(let uniqueHandle):
+                    let payload: [String: Any] = [
+                        "id": uid,
+                        "email": user.email ?? "",
+                        "display_name": normalizedDisplayName,
+                        "display_name_lower": normalizedDisplayName.lowercased(),
+                        "username": uniqueHandle,
+                        "username_lower": uniqueHandle,
+                        "handle": uniqueHandle,
+                        "search_prefix": UserProfile.searchPrefixes(username: normalizedDisplayName, handle: uniqueHandle),
+                        "bio": "",
+                        "avatar_url": "",
+                        "profile_picture_url": "",
+                        "created_at": Timestamp(date: Date())
+                    ]
+                    docRef.setData(payload) { err in
+                        if let err = err { completion(.failure(err)) }
+                        else { completion(.success(())) }
+                    }
+                }
             }
         }
+    }
+
+    private func makeUniqueHandle(base: String, excludingUserId: String, attempt: Int = 0, completion: @escaping (Result<String, Error>) -> Void) {
+        let trimmedBase = ProfileIdentityValidator.sanitizedHandleInput(base)
+        let fallbackBase = "user_" + String(excludingUserId.prefix(6)).lowercased()
+        let usableBase = trimmedBase.isEmpty ? fallbackBase : trimmedBase
+        let suffix = attempt == 0 ? "" : "\(attempt + 1)"
+        let maxBaseLength = max(1, ProfileIdentityValidator.maxHandleLength - suffix.count)
+        let candidateBase = String(usableBase.prefix(maxBaseLength))
+        let candidate = candidateBase + suffix
+
+        if ProfileIdentityValidator.handleError(candidate) != nil {
+            makeUniqueHandle(base: fallbackBase, excludingUserId: excludingUserId, attempt: attempt + 1, completion: completion)
+            return
+        }
+
+        db.collection("users")
+            .whereField("username_lower", isEqualTo: candidate)
+            .limit(to: 1)
+            .getDocuments { snap, error in
+                if let error = error {
+                    completion(.failure(error))
+                    return
+                }
+                let taken = (snap?.documents ?? []).contains { doc in
+                    let docUserId = (doc.data()["id"] as? String) ?? doc.documentID
+                    return docUserId != excludingUserId
+                }
+                if taken {
+                    self.makeUniqueHandle(base: usableBase, excludingUserId: excludingUserId, attempt: attempt + 1, completion: completion)
+                } else {
+                    completion(.success(candidate))
+                }
+            }
     }
 }
 

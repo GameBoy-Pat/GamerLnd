@@ -176,7 +176,7 @@ struct UserProfile: Identifiable, Hashable {
         self.username = uname
         self.handle = h
         self.bio = (data["bio"] as? String) ?? ""
-        self.avatarURL = (data["avatar_url"] as? String)
+        self.avatarURL = (UserRecordAvatarResolver.url(from: data))
         self.createdAt = (data["created_at"] as? Timestamp)
         self.updatedAt = (data["updated_at"] as? Timestamp)
     }

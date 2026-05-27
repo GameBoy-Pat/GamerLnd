@@ -110,6 +110,8 @@ struct GameLogDetailView: View {
     @State private var bookmarksList: [BookmarkEntry] = []
     @State private var watchlistIds: Set<Int> = []
     @State private var bookmarksSort: BookmarkSort = .recent
+    @State private var isPreparingShareCard: Bool = false
+    @State private var activeShareSheet: ShareSheetPayload? = nil
 
     // Display metadata for the info card (enriched via IGDB using gameLog.gameId)
     @State private var displayName: String = ""
@@ -128,6 +130,45 @@ struct GameLogDetailView: View {
             return ColorTheme.ratingBandColor(for: rating)
         }
         return ColorTheme.separator
+    }
+
+    private func shareReviewCard() {
+        guard !isPreparingShareCard else { return }
+        isPreparingShareCard = true
+
+        Task { @MainActor in
+            let fallbackName = authorName.isEmpty ? (authorUsernameOverride ?? "Gamer") : authorName
+            let identity = await GamerLndShareCardRenderer.fetchUserIdentity(
+                userId: gameLog.userId,
+                fallbackName: fallbackName
+            )
+            let avatarImage = await GamerLndShareCardRenderer.loadAvatarImage(urlString: identity.avatarURL)
+            let fallbackHandle = authorUsernameOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let resolvedHandle = fallbackHandle.isEmpty
+                ? (identity.handle ?? identity.displayName.replacingOccurrences(of: " ", with: "").lowercased())
+                : fallbackHandle.replacingOccurrences(of: "@", with: "")
+
+            let request = ReviewShareCardRequest(
+                gameTitle: displayName.isEmpty ? gameName : displayName,
+                releaseYear: displayYear,
+                primaryStudio: primaryStudioName,
+                username: resolvedHandle,
+                displayName: identity.displayName,
+                userRating: gameLog.rating,
+                averageRating: avgRating,
+                reviewText: gameLog.review,
+                coverImageId: gameLog.cover?.imageId,
+                avatarImage: avatarImage
+            )
+
+            let payload = await GamerLndShareCardRenderer.makeReviewSharePayload(request: request)
+            isPreparingShareCard = false
+            if let payload {
+                activeShareSheet = payload
+            } else {
+                errorText = "Could not generate share card right now."
+            }
+        }
     }
 
     var body: some View {
@@ -194,7 +235,14 @@ struct GameLogDetailView: View {
         .toolbar {
             if !embeddedOverlay {
                 ToolbarItem(placement: .principal) { AppIconCentered() }
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button {
+                        shareReviewCard()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .foregroundColor(ColorTheme.text)
+                    }
+
                     Menu {
                         Button {
                             reportTarget = ReportTarget(
@@ -213,11 +261,20 @@ struct GameLogDetailView: View {
                     }
                 }
             }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                KeyboardDismissAccessoryButton {
+                    commentFocused = false
+                }
+            }
         }
         .sheet(isPresented: $showReportSheet) {
             if let target = reportTarget {
                 ReportSheet(target: target, resultText: $reportResultText)
             }
+        }
+        .sheet(item: $activeShareSheet) { payload in
+            SharePreviewSheet(payload: payload)
         }
         .overlay {
             if showReviewOverlay {
@@ -262,6 +319,29 @@ struct GameLogDetailView: View {
                 }
             } else if showBookmarksOverlay {
                 bookmarksOverlay
+            } else if isPreparingShareCard {
+                ZStack {
+                    OverlayBackdrop()
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 14) {
+                        ProgressView()
+                            .tint(ColorTheme.accent)
+                        Text("Preparing share card...")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(ColorTheme.text)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(ColorTheme.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(ColorTheme.separator, lineWidth: 1)
+                            )
+                    )
+                }
             }
         }
         .alert("Spoiler Warning", isPresented: $showSpoilerWarning) {
@@ -500,19 +580,22 @@ struct GameLogDetailView: View {
                         let shouldLike = !isLikedByCurrentUser
                         isLikeMutationInFlight = true
                         isLikedByCurrentUser = shouldLike
-                        InteractionService.shared.setLike(
+                        let previousCount = likeCount
+                        likeCount = max(0, likeCount + (shouldLike ? 1 : -1))
+                        InteractionService.shared.setLikeState(
                             log: gameLog,
                             shouldLike: shouldLike
                         ) { result in
                             isLikeMutationInFlight = false
                             switch result {
-                            case .success(let isNowLiked):
-                                isLikedByCurrentUser = isNowLiked
+                            case .success(let state):
+                                isLikedByCurrentUser = state.isLiked
+                                likeCount = state.count
                             case .failure(let error):
                                 errorText = error.localizedDescription
                                 isLikedByCurrentUser = !shouldLike
+                                likeCount = previousCount
                             }
-                            loadLikeState()
                         }
                     } label: {
                         Image(systemName: isLikedByCurrentUser ? "hand.thumbsup.fill" : "hand.thumbsup")
@@ -528,13 +611,13 @@ struct GameLogDetailView: View {
                     } label: {
                         Text(likePillTitle)
                             .font(.footnote.weight(.semibold))
-                            .foregroundColor(ColorTheme.text)
+                            .foregroundColor(Color.white.opacity(0.96))
                     }
                     .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(ColorTheme.surface))
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(userRatingAccent.opacity(0.58), lineWidth: 1))
 
                 Button {
@@ -562,7 +645,7 @@ struct GameLogDetailView: View {
 
             if !comments.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Recent Comments")
+                    Text("Recent Comments (\(comments.count))")
                         .font(.caption.weight(.semibold))
                         .foregroundColor(ColorTheme.subtext)
 
@@ -590,7 +673,7 @@ struct GameLogDetailView: View {
                             }
                         }
                     }
-                    .frame(maxWidth: .infinity, minHeight: 74, maxHeight: 74, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
                     .background(RoundedRectangle(cornerRadius: 10).fill(ColorTheme.surface))
@@ -700,7 +783,14 @@ struct GameLogDetailView: View {
 
     private var commentsOverlay: some View {
         GeometryReader { geo in
-            ZStack {
+            let keyboardInset = max(0, commentsKeyboardHeight - geo.safeAreaInsets.bottom)
+            let topInset: CGFloat = 64
+            let sideInset: CGFloat = 14
+            let panelWidth = min(geo.size.width - (sideInset * 2), 396)
+            let availableHeight = max(360, geo.size.height - topInset - max(18, keyboardInset + 12))
+            let panelHeight = min(availableHeight, 610.0)
+
+            ZStack(alignment: .top) {
                 Color.black.opacity(0.62)
                     .ignoresSafeArea()
                     .onTapGesture { showCommentsOverlay = false }
@@ -824,14 +914,14 @@ struct GameLogDetailView: View {
                             .background(ColorTheme.background)
                     }
                     .frame(
-                        width: geo.size.width,
-                        height: max(320, geo.size.height - max(0, commentsKeyboardHeight - geo.safeAreaInsets.bottom))
+                        width: panelWidth,
+                        height: panelHeight
                     )
                     .background(RoundedRectangle(cornerRadius: 18).fill(ColorTheme.background))
                     .overlay(RoundedRectangle(cornerRadius: 18).stroke(ColorTheme.separator, lineWidth: 1))
-
-                    Spacer(minLength: 0)
                 }
+                .padding(.horizontal, sideInset)
+                .padding(.top, topInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
                 if showCommentsReviewOverlay {
@@ -848,6 +938,7 @@ struct GameLogDetailView: View {
                 }
             }
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
     }
 
     private func syncHostChromeSuppression() {
@@ -1242,14 +1333,28 @@ struct GameLogDetailView: View {
     }
 
     private var commentComposer: some View {
-        HStack(spacing: 8) {
-            TextField("Add a comment…", text: $newComment)
-                .foregroundColor(ColorTheme.text)
-                .textInputAutocapitalization(.sentences)
-                .disableAutocorrection(false)
-                .padding(10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(ColorTheme.surface))
-                .focused($commentFocused)
+        HStack(alignment: .bottom, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                if newComment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Add a comment…")
+                        .font(.body)
+                        .foregroundColor(ColorTheme.subtext)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 14)
+                }
+                TextEditor(text: $newComment)
+                    .foregroundColor(ColorTheme.text)
+                    .scrollContentBackground(.hidden)
+                    .textInputAutocapitalization(.sentences)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(minHeight: 52, maxHeight: 112)
+                    .background(Color.clear)
+                    .focused($commentFocused)
+            }
+            .background(RoundedRectangle(cornerRadius: 14).fill(ColorTheme.surface))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(ColorTheme.separator.opacity(0.7), lineWidth: 1))
+
             Button {
                 sendComment()
             } label: {
@@ -1668,16 +1773,21 @@ struct GameLogDetailView: View {
     }
 
     private func loadLikeState() {
-        db.collection("review_likes")
-            .whereField("log_id", isEqualTo: gameLog.id)
-            .getDocuments { snap, _ in
-                DispatchQueue.main.async {
-                    let docs = snap?.documents ?? []
-                    likeCount = docs.count
-                    let currentUserId = Auth.auth().currentUser?.uid ?? ""
-                    isLikedByCurrentUser = docs.contains { ($0.data()["user_id"] as? String) == currentUserId }
-                }
+        let currentUserId = Auth.auth().currentUser?.uid ?? ""
+        guard !currentUserId.isEmpty else {
+            likeCount = 0
+            isLikedByCurrentUser = false
+            return
+        }
+        InteractionService.shared.fetchLikeState(logId: gameLog.id, currentUserId: currentUserId) { result in
+            switch result {
+            case .success(let state):
+                likeCount = state.count
+                isLikedByCurrentUser = state.isLiked
+            case .failure:
+                break
             }
+        }
     }
 
     private func loadReferenceState() {
@@ -1834,7 +1944,7 @@ struct GameLogDetailView: View {
                                     ?? (data["email"] as? String)
                                     ?? "User"
                                 resultQueue.sync {
-                                    fetchedUsers[uid] = (name, data["avatar_url"] as? String)
+                                    fetchedUsers[uid] = (name, UserRecordAvatarResolver.url(from: data))
                                 }
                             }
                             group.leave()
@@ -1924,7 +2034,7 @@ struct GameLogDetailView: View {
                             ?? (data["email"] as? String)
                             ?? "User"
                         commentAuthorNames[uid] = name
-                        if let avatar = data["avatar_url"] as? String, !avatar.isEmpty {
+                        if let avatar = UserRecordAvatarResolver.url(from: data), !avatar.isEmpty {
                             commentAuthorAvatars[uid] = avatar
                         }
                     }
@@ -2128,7 +2238,7 @@ struct CommentRow: View {
                 ?? (data["email"] as? String)
                 ?? "User"
             self.username = name
-            if let avatar = data["avatar_url"] as? String, !avatar.isEmpty {
+            if let avatar = UserRecordAvatarResolver.url(from: data), !avatar.isEmpty {
                 self.avatarUrl = avatar
             }
         }

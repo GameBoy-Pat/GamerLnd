@@ -379,7 +379,8 @@ struct GameDetailView: View {
         .confirmationDialog("Save draft before leaving?", isPresented: $showDraftPrompt, titleVisibility: .visible) {
             Button("Save Draft") { Haptics.commit(); saveDraftAndDismiss() }
             Button("Leave Without Saving", role: .destructive) { Haptics.tap(); closeView() }
-            Button("Keep Editing", role: .cancel) { }
+            Button("Stay Here") { }
+            Button("Cancel", role: .cancel) { }
         }
         .confirmationDialog("Save review draft?", isPresented: $showReviewDraftPrompt, titleVisibility: .visible) {
             Button("Save Draft") { saveReviewDraftOnly() }
@@ -389,7 +390,8 @@ struct GameDetailView: View {
                 reviewEditorFocused = false
                 showReviewComposer = false
             }
-            Button("Keep Editing", role: .cancel) { }
+            Button("Stay Here") { }
+            Button("Cancel", role: .cancel) { }
         }
         .alert("Delete Log?", isPresented: $showDeleteLogConfirm) {
             Button("Cancel", role: .cancel) {}
@@ -789,7 +791,9 @@ struct GameDetailView: View {
     private var saveButton: some View {
         Button {
             if hasExistingLog && !isEditingExistingLog {
-                isEditingExistingLog = true
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isEditingExistingLog = true
+                }
                 Haptics.tap()
                 return
             }

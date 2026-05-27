@@ -31,6 +31,8 @@ struct ListDetailView: View {
     @State private var draftListTitle: String = ""
     @State private var draftListIsPublic: Bool = true
     @State private var showEditMetaSheet: Bool = false
+    @State private var isPreparingShareCard: Bool = false
+    @State private var activeShareSheet: ShareSheetPayload? = nil
 
     // UI
     @State private var showAddSheet: Bool = false
@@ -51,6 +53,7 @@ struct ListDetailView: View {
     @State private var rankedEditMode: Bool = false
     @State private var rankedLayout: RankedLayout = .list
     @State private var rankedGridDirty: Bool = false // track unsaved grid edits
+    @State private var hasPostedMiniRewardSuppression: Bool = false
 
     private let db = Firestore.firestore()
 
@@ -99,6 +102,25 @@ struct ListDetailView: View {
         }
         .background(ColorTheme.background.ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        .onAppear {
+            guard !hasPostedMiniRewardSuppression else { return }
+            hasPostedMiniRewardSuppression = true
+            NotificationCenter.default.post(
+                name: .nestedOverlayVisibilityChanged,
+                object: nil,
+                userInfo: ["visible": true]
+            )
+        }
+        .onDisappear {
+            if hasPostedMiniRewardSuppression {
+                NotificationCenter.default.post(
+                    name: .nestedOverlayVisibilityChanged,
+                    object: nil,
+                    userInfo: ["visible": false]
+                )
+                hasPostedMiniRewardSuppression = false
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             // Center brand
@@ -131,6 +153,13 @@ struct ListDetailView: View {
 
             // Trailing menu
             ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button {
+                    shareListCard()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundColor(ColorTheme.accent)
+                }
+
                 if isOwner {
                     Menu {
                         if list.type == .tiered {
@@ -305,6 +334,35 @@ struct ListDetailView: View {
                     Text("Tap a color chip or lane label to edit")
                         .font(.caption2)
                         .foregroundColor(ColorTheme.subtext)
+                }
+            }
+        }
+        .sheet(item: $activeShareSheet) { payload in
+            SharePreviewSheet(payload: payload)
+        }
+        .overlay {
+            if isPreparingShareCard {
+                ZStack {
+                    OverlayBackdrop()
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 14) {
+                        ProgressView()
+                            .tint(ColorTheme.accent)
+                        Text("Preparing share card...")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(ColorTheme.text)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .fill(ColorTheme.surface)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(ColorTheme.separator, lineWidth: 1)
+                            )
+                    )
                 }
             }
         }
@@ -642,7 +700,7 @@ struct ListDetailView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("Pool")
+                        Text("Not Ranked")
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(ColorTheme.subtext)
                         if editTierMode {
@@ -780,6 +838,83 @@ struct ListDetailView: View {
             return "Loading…"
         }
         return name
+    }
+
+    private func shareListCard() {
+        guard !isPreparingShareCard else { return }
+        isPreparingShareCard = true
+
+        Task { @MainActor in
+            let identity = await GamerLndShareCardRenderer.fetchUserIdentity(
+                userId: list.ownerId,
+                fallbackName: currentListTitle
+            )
+            let avatarImage = await GamerLndShareCardRenderer.loadAvatarImage(urlString: identity.avatarURL)
+
+            let orderedItems: [UserListItem]
+            switch list.type {
+            case .regular:
+                orderedItems = items.sorted { ($0.addedAt ?? .distantPast) > ($1.addedAt ?? .distantPast) }
+            case .ranked:
+                orderedItems = items.sorted { ($0.order ?? 0) < ($1.order ?? 0) }
+            case .tiered:
+                orderedItems = items.sorted { ($0.order ?? 0) < ($1.order ?? 0) }
+            }
+
+            let topEntries = Array(orderedItems.prefix(10)).enumerated().map { index, item in
+                ShareListEntry(
+                    id: item.id,
+                    title: displayName(for: item),
+                    coverImageId: item.coverImageId,
+                    rank: list.type == .ranked ? (item.order.map { $0 + 1 } ?? (index + 1)) : nil,
+                    tier: item.tier
+                )
+            }
+
+            let tierRows: [ShareTierPreviewRow]
+            if list.type == .tiered {
+                let labels = editableTierLabels.isEmpty ? normalizedTierLabels() : editableTierLabels
+                let colors = editableTierColors.isEmpty ? normalizedTierColors() : editableTierColors
+                tierRows = Array(labels.enumerated().map { index, label in
+                    let titles = orderedItems
+                        .filter { ($0.tier ?? "").caseInsensitiveCompare(label) == .orderedSame }
+                        .prefix(3)
+                        .map(displayName(for:))
+                    return ShareTierPreviewRow(
+                        id: "tier_\(index)",
+                        label: label,
+                        colorHex: index < colors.count ? colors[index] : "#6E7681",
+                        itemTitles: titles,
+                        coverImageIds: orderedItems
+                            .filter { ($0.tier ?? "").caseInsensitiveCompare(label) == .orderedSame }
+                            .prefix(3)
+                            .compactMap(\.coverImageId)
+                    )
+                }.prefix(5))
+            } else {
+                tierRows = []
+            }
+
+            let request = ListShareCardRequest(
+                title: currentListTitle,
+                ownerName: identity.displayName,
+                ownerHandle: identity.handle,
+                ownerAvatarImage: avatarImage,
+                type: list.type,
+                description: list.description,
+                itemCount: items.count,
+                topEntries: topEntries,
+                tierPreviewRows: tierRows
+            )
+
+            let payload = await GamerLndShareCardRenderer.makeListSharePayload(request: request)
+            isPreparingShareCard = false
+            if let payload {
+                activeShareSheet = payload
+            } else {
+                errorText = "Could not generate share card right now."
+            }
+        }
     }
 
     // MARK: - Actions

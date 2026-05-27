@@ -8,6 +8,27 @@ import FirebaseAuth
 import os.log
 
 struct ContentView: View {
+    private enum FeedTimelineEntry: Identifiable {
+        case log(FeedActivityItem)
+        case list(UserList)
+
+        var id: String {
+            switch self {
+            case .log(let item): return "log_\(item.id)"
+            case .list(let list): return "list_\(list.id)"
+            }
+        }
+
+        var sortDate: Date {
+            switch self {
+            case .log(let item):
+                return item.gameLog.playDate.dateValue()
+            case .list(let list):
+                return list.createdAt.dateValue()
+            }
+        }
+    }
+
     private static let feedRelativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -55,6 +76,8 @@ struct ContentView: View {
     @State private var authListener: AuthStateDidChangeListenerHandle?
     @State private var isLoggedIn: Bool = false
     @State private var activeAuthUserId: String? = nil
+    @State private var hasResolvedInitialAuthState: Bool = false
+    @State private var isPreparingInitialHome: Bool = false
     @State private var showVerificationLoginOverlay: Bool = false
     @State private var verificationOverlayText: String = ""
     @State private var isProcessingVerificationLogin: Bool = false
@@ -70,6 +93,7 @@ struct ContentView: View {
     @State private var isLoadingForYou: Bool = false
     @State private var selectedFeed: String = "Following"
     @State private var selectedFeedFilter: FeedFilter = .both
+    private let enableMixedFeedTimeline = false
 
     @State private var showAlert: Bool = false
     @State private var alertMessage: String = ""
@@ -84,6 +108,7 @@ struct ContentView: View {
     @State private var likedSet: Set<String> = []
     @State private var likeCounts: [String: Int] = [:]
     @State private var pendingLikeLogIds: Set<String> = []
+    @State private var likeMutationVersion: [String: Int] = [:]
     @State private var commentCounts: [String: Int] = [:]
     @State private var commentedLogIds: Set<String> = []
     @State private var avgCache: [Int: (avg: Double?, count: Int)] = [:]
@@ -110,27 +135,41 @@ struct ContentView: View {
     @State private var publicListPreviews: [String: [String]] = [:]
     @State private var logOverlayGame: Game? = nil
     @State private var logDetailOverlay: LogDetailOverlayContext? = nil
-    @State private var expandedFeedItem: FeedActivityItem? = nil
-    @State private var expandedFeedDetailsVisible: Bool = false
     @State private var flippedCards: Set<String> = []
     @State private var likePulseIds: Set<String> = []
+    @State private var isPreparingShareCard: Bool = false
+    @State private var activeShareSheet: ShareSheetPayload? = nil
     @State private var trackedImpressionKeys: Set<String> = []
     @State private var feedLoadTask: Task<Void, Never>? = nil
+    @State private var startupServicesTask: Task<Void, Never>? = nil
     @State private var isRefreshingFeed: Bool = false
     @State private var requestedNameIds: Set<Int> = []
     @State private var requestedAverageGameIds: Set<Int> = []
     @State private var requestedHasLoggedGameIds: Set<Int> = []
     @State private var lastRefreshAt: Date? = nil
     @State private var showFeedHint: Bool = true
-    private enum RewardToastStyle {
+    private enum RewardToastStyle: Equatable {
         case standard
         case secret
+    }
+
+    private struct RewardToastEntry: Identifiable, Equatable {
+        let id = UUID()
+        let text: String
+        let icon: String
+        let style: RewardToastStyle
+
+        static func == (lhs: RewardToastEntry, rhs: RewardToastEntry) -> Bool {
+            lhs.text == rhs.text && lhs.icon == rhs.icon && lhs.style == rhs.style
+        }
     }
 
     @State private var rewardToastText: String = ""
     @State private var showRewardToast: Bool = false
     @State private var rewardToastIcon: String = "sparkles"
     @State private var rewardToastStyle: RewardToastStyle = .standard
+    @State private var rewardToastQueue: [RewardToastEntry] = []
+    @State private var isRewardToastPresenting: Bool = false
     @State private var miniRewardXP: Int = 0
     @State private var displayedMiniRewardXP: Int = 0
     @State private var miniRewardTheme: RewardService.Theme = .xp
@@ -184,8 +223,6 @@ struct ContentView: View {
         || showCreateMenu
         || logOverlayGame != nil
         || logDetailOverlay != nil
-        || expandedFeedItem != nil
-        || expandedFeedItem != nil
         || showMiniRewardHistoryOverlay
         || showVerificationLoginOverlay
         || addToListGame != nil
@@ -213,7 +250,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootContentView: some View {
-        if !isLoggedIn {
+        if !hasResolvedInitialAuthState || (isLoggedIn && isPreparingInitialHome) {
+            SplashView(message: isLoggedIn ? "Loading your feed..." : "Loading your library...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !isLoggedIn {
             loggedOutRootView
         } else {
             loggedInRootView
@@ -284,15 +324,6 @@ struct ContentView: View {
             ratingsOverlayView()
                 .transition(.opacity)
                 .zIndex(995)
-        }
-    }
-
-    @ViewBuilder
-    private var feedExpansionLayer: some View {
-        if let item = expandedFeedItem {
-            expandedFeedPreviewOverlay(item: item)
-                .transition(.opacity)
-                .zIndex(965)
         }
     }
 
@@ -369,12 +400,15 @@ struct ContentView: View {
             floatingButtonLayer
             profileOverlayNavCoverLayer
             primaryOverlayLayer
-            feedExpansionLayer
             secondaryOverlayLayer
             miniRewardLayer
         }
         .ignoresSafeArea(.keyboard, edges: .all)
         .preferredColorScheme(.dark)
+    }
+
+    private func scheduleDeferredStartupServices() {
+        startupServicesTask?.cancel()
     }
 
     private var sceneWithLifecycleHandlers: some View {
@@ -383,14 +417,12 @@ struct ContentView: View {
                 refreshAuthVerificationState()
                 if Auth.auth().currentUser != nil {
                     activeAuthUserId = Auth.auth().currentUser?.uid
-                    loadMiniRewardState()
-                    loadActivityBadgeCount()
-                    ensureGamificationAssignments()
                 }
                 authListener = Auth.auth().addStateDidChangeListener { _, user in
                     let wasLoggedIn = isLoggedIn
                     let previousUserId = activeAuthUserId
                     activeAuthUserId = user?.uid
+                    hasResolvedInitialAuthState = true
                     if user == nil {
                         isLoggedIn = false
                     } else {
@@ -404,6 +436,8 @@ struct ContentView: View {
                         likedSet = []; likeCounts = [:]; commentCounts = [:]; commentedLogIds = []
                         watchlistIds = []; bookmarksList = []; avgCache = [:]; gameNameCache = [:]
                         hasLogged = [:]
+                        requestedNameIds = []; requestedAverageGameIds = []; requestedHasLoggedGameIds = []
+                        usernameCache = [:]; displayNameCache = [:]; avatarCache = [:]
                         trustedCache = [:]
                         activityBadgeCount = 0
                         profileOverlayPresented = false
@@ -411,17 +445,18 @@ struct ContentView: View {
                         miniRewardXP = 0
                         displayedMiniRewardXP = 0
                     }
-                    if isLoggedIn {
-                        loadMiniRewardState()
-                        loadActivityBadgeCount()
-                        ensureGamificationAssignments()
-                    }
                 }
-                if currentTab == .home { runFeedTask { await initialLoad() } }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 refreshAuthVerificationState()
-                if isLoggedIn { ensureGamificationAssignments() }
+            }
+            .onChange(of: isLoggedIn) { _, loggedIn in
+                if loggedIn {
+                    startInitialHomeBootstrapIfNeeded()
+                } else {
+                    isPreparingInitialHome = false
+                    startupServicesTask?.cancel()
+                }
             }
             .onChange(of: currentTab) { _, newValue in
                 if newValue != .profile {
@@ -505,10 +540,41 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .switchToExplore)) { _ in
                 currentTab = .explore
             }
+            .onReceive(NotificationCenter.default.publisher(for: .requestAuthRefreshAfterLogin)) { _ in
+                refreshAuthVerificationState()
+            }
     }
 
     var body: some View {
         sceneWithNotificationHandlers
+            .sheet(item: $activeShareSheet) { payload in
+                SharePreviewSheet(payload: payload)
+            }
+            .overlay {
+                if isPreparingShareCard {
+                    ZStack {
+                        Color.black.opacity(0.45)
+                            .ignoresSafeArea()
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .tint(ColorTheme.accent)
+                            Text("Preparing share card…")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundColor(ColorTheme.text)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(ColorTheme.surface)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .stroke(ColorTheme.separator, lineWidth: 1)
+                                )
+                        )
+                    }
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .rewardXPAwarded)) { note in
                 guard let delta = note.userInfo?["delta"] as? Int, delta > 0 else { return }
                 let raw = note.userInfo?["theme"] as? String
@@ -670,15 +736,35 @@ struct ContentView: View {
     }
 
     private func presentRewardToast(text: String, icon: String, style: RewardToastStyle = .standard) {
-        rewardToastText = text
-        rewardToastIcon = icon
-        rewardToastStyle = style
+        let entry = RewardToastEntry(text: text, icon: icon, style: style)
+        if rewardToastQueue.contains(entry) || (isRewardToastPresenting && rewardToastText == text && rewardToastIcon == icon) {
+            return
+        }
+        rewardToastQueue.append(entry)
+        presentNextRewardToastIfNeeded()
+    }
+
+    private func presentNextRewardToastIfNeeded() {
+        guard !isRewardToastPresenting else { return }
+        guard !rewardToastQueue.isEmpty else { return }
+
+        let entry = rewardToastQueue.removeFirst()
+        isRewardToastPresenting = true
+        rewardToastText = entry.text
+        rewardToastIcon = entry.icon
+        rewardToastStyle = entry.style
+
         withAnimation(.spring(response: 0.62, dampingFraction: 0.94)) {
             showRewardToast = true
         }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.7) {
             withAnimation(.easeInOut(duration: 0.32)) {
                 showRewardToast = false
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
+                isRewardToastPresenting = false
+                presentNextRewardToastIfNeeded()
             }
         }
     }
@@ -989,12 +1075,14 @@ struct ContentView: View {
             isLoggedIn = false
             isProcessingVerificationLogin = false
             showVerificationLoginOverlay = false
+            hasResolvedInitialAuthState = true
             return
         }
         let providers = Set(user.providerData.map { $0.providerID })
         guard providers.contains("password") else {
             pendingEmailVerification = false
             isLoggedIn = true
+            hasResolvedInitialAuthState = true
             return
         }
         user.reload { _ in
@@ -1003,6 +1091,7 @@ struct ContentView: View {
                 isLoggedIn = false
                 isProcessingVerificationLogin = false
                 showVerificationLoginOverlay = false
+                hasResolvedInitialAuthState = true
                 return
             }
             if refreshed.isEmailVerified {
@@ -1020,14 +1109,17 @@ struct ContentView: View {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             showVerificationLoginOverlay = false
                         }
+                        hasResolvedInitialAuthState = true
                     }
                 } else {
                     isLoggedIn = true
+                    hasResolvedInitialAuthState = true
                 }
             } else {
                 isLoggedIn = false
                 isProcessingVerificationLogin = false
                 showVerificationLoginOverlay = false
+                hasResolvedInitialAuthState = true
                 if pendingEmailVerification {
                     NotificationCenter.default.post(name: .emailVerificationNotDetected, object: nil)
                 }
@@ -1179,14 +1271,8 @@ struct ContentView: View {
                 .padding(.bottom, 2)
                 .animation(.none, value: selectedFeed)
 
-                TabView(selection: $selectedFeed) {
-                    feedPage(isFollowing: true)
-                        .tag("Following")
-                    feedPage(isFollowing: false)
-                        .tag("For You")
-                }
-                .padding(.top, 6)
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                feedPage(isFollowing: isFollowingFeedSelected)
+                    .padding(.top, 6)
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
@@ -1194,9 +1280,9 @@ struct ContentView: View {
             .background(ColorTheme.background)
             .onAppear {
                 if followingLogs.isEmpty && forYouLogs.isEmpty {
-                    Task { await initialLoad() }
+                    startInitialHomeBootstrapIfNeeded()
                 }
-                if selectedFeedFilter != .logs {
+                if selectedFeedFilter == .lists {
                     Task { await loadPublicLists() }
                 }
                 showFeedHintTemporarily()
@@ -1204,7 +1290,7 @@ struct ContentView: View {
             .onChange(of: selectedFeed) { _, _ in Task { await ensureLoadedSelectedFeed() } }
             .onChange(of: selectedFeed) { _, _ in showFeedHintTemporarily() }
             .onChange(of: selectedFeedFilter) { _, _ in
-                if selectedFeedFilter != .logs {
+                if selectedFeedFilter == .lists {
                     Task { await loadPublicLists() }
                 }
                 showFeedHintTemporarily()
@@ -1320,16 +1406,10 @@ struct ContentView: View {
                             .padding(.trailing, 2)
                         ForEach(trusted, id: \.id) { item in
                             Button {
-                                logDetailOverlay = LogDetailOverlayContext(
-                                    id: item.id,
-                                    gameLog: item.gameLog,
-                                    gameName: displayGameName(item),
-                                    username: item.username,
-                                    focusComment: false
-                                )
+                                openFeedItem(item, focusComment: false)
                             } label: {
                                 HStack(spacing: 6) {
-                                    AvatarView(name: item.username, size: 18, avatarURL: item.avatarUrl)
+                                    AvatarView(name: item.username, size: 18, avatarURL: resolvedCachedAvatar(for: item.gameLog.userId) ?? item.avatarUrl)
                                         .overlay(Circle().stroke(ColorTheme.separator, lineWidth: 1))
                                     Text(item.username)
                                         .font(.caption2.weight(.semibold))
@@ -1379,7 +1459,7 @@ struct ContentView: View {
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     guard !isReviewOverlayOpen else { return }
-                                    presentExpandedFeedPreview(for: item)
+                                    openFeedItem(item, focusComment: false)
                                 }
                                 .onAppear {
                                     if index >= logs.count - 5 {
@@ -1409,13 +1489,32 @@ struct ContentView: View {
                 LazyVStack(spacing: 6, pinnedViews: [.sectionHeaders]) {
                     Section(header: feedListsHeader(title: title)) {
                         ForEach(lists, id: \.id) { list in
-                            NavigationLink(
-                                destination: ListDetailView(list: list, isOwner: list.ownerId == Auth.auth().currentUser?.uid)
-                            ) {
-                                publicListRow(list: list)
-                            }
-                            .buttonStyle(.plain)
+                            shareablePublicListRow(list: list)
                         }
+                    }
+                }
+                .padding(.vertical, 4)
+                .transaction { t in t.animation = nil }
+            }
+        }
+    }
+
+    private func feedListsCarousel(lists: [UserList], title: String) -> some View {
+        Group {
+            if lists.isEmpty {
+                EmptyView()
+            } else {
+                VStack(spacing: 8) {
+                    feedListsHeader(title: title)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 12) {
+                            ForEach(lists, id: \.id) { list in
+                                shareableCompactPublicListCard(list: list)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 2)
                     }
                 }
                 .padding(.vertical, 4)
@@ -1437,33 +1536,90 @@ struct ContentView: View {
         .background(ColorTheme.background)
     }
 
+    private func mixedFeedTimeline(logs: [FeedActivityItem], lists: [UserList]) -> [FeedTimelineEntry] {
+        let logEntries = logs.map { FeedTimelineEntry.log($0) }
+        let listEntries = lists.map { FeedTimelineEntry.list($0) }
+        return (logEntries + listEntries).sorted { $0.sortDate > $1.sortDate }
+    }
+
+    private func mixedFeedBody(isLoading: Bool, logs: [FeedActivityItem], lists: [UserList], isFollowing: Bool) -> some View {
+        let entries = mixedFeedTimeline(logs: logs, lists: lists)
+        let paginationTriggerIds = Set(entries.suffix(5).map(\.id))
+
+        return Group {
+            if isLoading && entries.isEmpty {
+                FeedSkeletonList()
+            } else if entries.isEmpty {
+                Text("No recent activity. (Showing last \(DAYS_BACK) days.)")
+                    .foregroundColor(ColorTheme.subtext)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            } else {
+                VStack(spacing: 6) {
+                    feedHeader(isFollowing: isFollowing)
+
+                    ForEach(entries) { entry in
+                        mixedFeedEntryRow(
+                            entry,
+                            paginationTriggerIds: paginationTriggerIds,
+                            isFollowing: isFollowing
+                        )
+                    }
+
+                    if isLoading {
+                        ProgressView().tint(ColorTheme.accent).padding(.vertical, 8)
+                    }
+                }
+                .padding(.vertical, 4)
+                .transaction { t in t.animation = nil }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mixedFeedEntryRow(
+        _ entry: FeedTimelineEntry,
+        paginationTriggerIds: Set<String>,
+        isFollowing: Bool
+    ) -> some View {
+        switch entry {
+        case .log(let item):
+            let isReviewOverlayOpen = flippedCards.contains(item.gameLog.id)
+            feedRow(item: item)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !isReviewOverlayOpen else { return }
+                    openFeedItem(item, focusComment: false)
+                }
+                .onAppear {
+                    if paginationTriggerIds.contains(entry.id) {
+                        Task { await loadMore(isFollowing: isFollowing) }
+                    }
+                }
+                .padding(.horizontal, 0)
+                .padding(.vertical, 0)
+        case .list(let list):
+            shareablePublicListRow(list: list)
+        }
+    }
+
 
     private func feedPage(isFollowing: Bool) -> some View {
         let isLoading = isFollowing ? isLoadingFollowing : isLoadingForYou
         let logs = isFollowing ? followingLogs : forYouLogs
-        let lists = isFollowing ? followingPublicLists : publicLists
-        let showsLogs = selectedFeedFilter != .lists
-        let showsLists = selectedFeedFilter != .logs
-
-        if showsLogs && isLoading && logs.isEmpty && !showsLists {
-            return AnyView(
-                FeedSkeletonList()
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-                    .padding(.bottom, 68)
-            )
-        }
+        let primaryFollowingLists = followingPublicLists
+        let lists = isFollowing ? primaryFollowingLists : publicLists
+        let showsLists = selectedFeedFilter == .lists
 
         return AnyView(
             ScrollView {
-                if showsLogs {
-                    feedBody(isLoading: isLoading, logs: logs, isFollowing: isFollowing)
-                }
                 if showsLists {
                     feedListsBody(
                         lists: lists,
-                        title: isFollowing ? "Lists For You" : "Trending Lists"
+                        title: isFollowing ? "Following Lists" : "Trending Lists"
                     )
+                } else {
+                    feedBody(isLoading: isLoading, logs: logs, isFollowing: isFollowing)
                 }
             }
             .refreshable { await refreshCurrentFeed() }
@@ -1476,9 +1632,29 @@ struct ContentView: View {
 
     private func feedRow(item: FeedActivityItem) -> some View {
         return feedRowCard(item: item)
-            .onAppear {
-                trackFeedImpressionIfNeeded(for: item)
-            }
+    }
+
+    private func fastFeedItems(from logs: [GameLog]) -> [FeedActivityItem] {
+        logs.map { log in
+            FeedActivityItem(
+                id: log.id,
+                gameLog: log,
+                gameName: resolvedFeedGameName(for: log),
+                username: displayNameCache[log.userId] ?? usernameCache[log.userId] ?? "User",
+                avatarUrl: avatarCache[log.userId],
+                isTrustedGamer: trustedCache[log.userId] ?? false
+            )
+        }
+    }
+
+    private func replaceFeedItems(_ updatedItems: [FeedActivityItem], isFollowing: Bool) {
+        guard !updatedItems.isEmpty else { return }
+        let replacements = Dictionary(uniqueKeysWithValues: updatedItems.map { ($0.id, $0) })
+        if isFollowing {
+            followingLogs = followingLogs.map { replacements[$0.id] ?? $0 }
+        } else {
+            forYouLogs = forYouLogs.map { replacements[$0.id] ?? $0 }
+        }
     }
 
     private func feedRowCard(item: FeedActivityItem) -> FeedRowCard {
@@ -1497,6 +1673,7 @@ struct ContentView: View {
         return FeedRowCard(
             item: item,
             displayName: displayName,
+            avatarUrl: resolvedCachedAvatar(for: item.gameLog.userId) ?? item.avatarUrl,
             gameTitle: displayGameName(item),
             isMine: isMine,
             reviewText: reviewText,
@@ -1517,13 +1694,7 @@ struct ContentView: View {
             timestampRelative: timestamp.relative,
             timestampAbsolute: timestamp.absolute,
             onOpenLog: {
-                logDetailOverlay = LogDetailOverlayContext(
-                    id: item.id,
-                    gameLog: item.gameLog,
-                    gameName: displayGameName(item),
-                    username: item.username,
-                    focusComment: false
-                )
+                openFeedItem(item, focusComment: false)
             },
             onOpenSpoilerReview: {
                 spoilerReviewItem = item
@@ -1571,6 +1742,9 @@ struct ContentView: View {
                     rating: nil, ratingCount: nil, totalRatingCount: nil, screenshots: nil
                 )
                 openBookmarksOverlay()
+            },
+            onShare: {
+                shareFeedGameCard(item)
             },
             onToggleLike: {
                 handleFeedLikeToggle(for: item.gameLog)
@@ -1730,19 +1904,13 @@ struct ContentView: View {
 
                         HStack(spacing: 12) {
                             Button {
-                                logDetailOverlay = LogDetailOverlayContext(
-                                    id: item.id,
-                                    gameLog: item.gameLog,
-                                    gameName: displayGameName(item),
-                                    username: item.username,
-                                    focusComment: false
-                                )
+                                openFeedItem(item, focusComment: false)
                             } label: {
                                 actionIcon(
                                     "bubble.right",
                                     count: commentCounts[item.gameLog.id] ?? 0,
                                     tint: commentedLogIds.contains(item.gameLog.id) ? ColorTheme.accent : .white,
-                                    countHighlighted: commentedLogIds.contains(item.gameLog.id),
+                                    countHighlighted: false,
                                     size: .large
                                 )
                             }
@@ -1791,7 +1959,8 @@ struct ContentView: View {
                                 actionIcon(isLiked ? "hand.thumbsup.fill" : "hand.thumbsup",
                                            count: likeCounts[item.gameLog.id] ?? 0,
                                            tint: isLiked ? ColorTheme.accent : .white,
-                                           countHighlighted: isLiked,
+                                           countHighlighted: false,
+                                           badgeStroke: isLiked ? ColorTheme.accent : nil,
                                            size: .large)
                             }
                             .scaleEffect(likePulseIds.contains(item.gameLog.id) ? 1.14 : 1.0)
@@ -1827,7 +1996,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 HStack(spacing: 8) {
-                    AvatarView(name: displayName, size: 20, avatarURL: item.avatarUrl)
+                    AvatarView(name: displayName, size: 20, avatarURL: resolvedCachedAvatar(for: item.gameLog.userId) ?? item.avatarUrl)
                         .overlay(Circle().stroke(ColorTheme.separator, lineWidth: 1))
                     Text("\(displayName)’s review")
                         .font(.caption.weight(.semibold))
@@ -1954,7 +2123,7 @@ struct ContentView: View {
 
     private func profileHeaderIdentity(item: FeedActivityItem, displayName: String, isMine: Bool) -> some View {
         return HStack(spacing: 8) {
-            AvatarView(name: displayName, size: 28, avatarURL: item.avatarUrl)
+            AvatarView(name: displayName, size: 28, avatarURL: resolvedCachedAvatar(for: item.gameLog.userId) ?? item.avatarUrl)
                 .overlay(Circle().stroke(ColorTheme.separator, lineWidth: 1))
 
             HStack(spacing: 3) {
@@ -2077,7 +2246,7 @@ struct ContentView: View {
         var countFont: Font { self == .large ? .caption.weight(.semibold) : .caption2.weight(.semibold) }
     }
 
-    private func actionIcon(_ systemName: String, count: Int?, tint: Color = .white, countHighlighted: Bool = true, size: ActionIconSize = .regular) -> some View {
+    private func actionIcon(_ systemName: String, count: Int?, tint: Color = .white, countHighlighted: Bool = true, badgeStroke: Color? = nil, size: ActionIconSize = .regular) -> some View {
         ZStack(alignment: .topTrailing) {
             Image(systemName: systemName)
                 .font(size.iconFont)
@@ -2087,16 +2256,16 @@ struct ContentView: View {
             if let count = count {
                 Text("\(min(max(count, 0), 99))")
                     .font(size.countFont)
-                    .foregroundColor(countHighlighted ? .white : ColorTheme.subtext)
-                    .shadow(color: .black.opacity(0.65), radius: 0.8, x: 0, y: 0.6)
+                    .foregroundColor(Color.white.opacity(0.95))
+                    .shadow(color: .black.opacity(0.45), radius: 0.6, x: 0, y: 0.4)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(
                         Capsule()
-                            .fill(countHighlighted ? ColorTheme.accent : Color.clear)
+                            .fill(Color.white.opacity(0.08))
                             .overlay(
                                 Capsule().stroke(
-                                    countHighlighted ? ColorTheme.accent : ColorTheme.separator.opacity(0.9),
+                                    badgeStroke ?? ColorTheme.separator.opacity(0.9),
                                     lineWidth: 1
                                 )
                             )
@@ -2113,13 +2282,26 @@ struct ContentView: View {
 
         for chunkStart in stride(from: 0, to: unique.count, by: 10) {
             let chunk = Array(unique[chunkStart..<min(chunkStart + 10, unique.count)])
+            let likeDocIds = chunk.map { "\(uid)_\($0)" }
+            let capturedVersions = Dictionary(uniqueKeysWithValues: chunk.map { ($0, likeMutationVersion[$0] ?? 0) })
             db.collection("review_likes")
-                .whereField("user_id", isEqualTo: uid)
-                .whereField("log_id", in: chunk)
-                .getDocuments { snap, _ in
-                    let ids = Set((snap?.documents ?? []).compactMap { $0.data()["log_id"] as? String })
+                .whereField(FieldPath.documentID(), in: likeDocIds)
+                .getDocuments(source: .server) { snap, _ in
+                    let ids = Set((snap?.documents ?? []).compactMap { doc -> String? in
+                        let data = doc.data()
+                        if let logId = data["log_id"] as? String {
+                            return logId
+                        }
+                        return doc.documentID.split(separator: "_").last.map(String.init)
+                    })
                     DispatchQueue.main.async {
-                        self.likedSet.formUnion(ids)
+                        for logId in chunk {
+                            guard self.likeMutationVersion[logId] == capturedVersions[logId] else { continue }
+                            self.likedSet.remove(logId)
+                            if ids.contains(logId) {
+                                self.likedSet.insert(logId)
+                            }
+                        }
                     }
                 }
         }
@@ -2131,19 +2313,27 @@ struct ContentView: View {
 
         for chunkStart in stride(from: 0, to: unique.count, by: 10) {
             let chunk = Array(unique[chunkStart..<min(chunkStart + 10, unique.count)])
+            let capturedVersions = Dictionary(uniqueKeysWithValues: chunk.map { ($0, likeMutationVersion[$0] ?? 0) })
             db.collection("review_likes")
                 .whereField("log_id", in: chunk)
-                .getDocuments { snap, _ in
+                .getDocuments(source: .server) { snap, _ in
                     let docs = snap?.documents ?? []
                     var counts: [String: Int] = [:]
+                    var uniqueUsersByLog: [String: Set<String>] = [:]
                     for id in chunk { counts[id] = 0 }
                     for doc in docs {
-                        if let logId = doc.data()["log_id"] as? String {
-                            counts[logId, default: 0] += 1
+                        let data = doc.data()
+                        if let logId = data["log_id"] as? String {
+                            let userKey = (data["user_id"] as? String) ?? doc.documentID
+                            uniqueUsersByLog[logId, default: []].insert(userKey)
                         }
                     }
                     DispatchQueue.main.async {
+                        for (logId, users) in uniqueUsersByLog {
+                            counts[logId] = users.count
+                        }
                         for (logId, count) in counts {
+                            guard self.likeMutationVersion[logId] == capturedVersions[logId] else { continue }
                             likeCounts[logId] = count
                         }
                     }
@@ -2186,22 +2376,7 @@ struct ContentView: View {
     }
 
     private func trackFeedImpressionIfNeeded(for item: FeedActivityItem) {
-        #if DEBUG
         return
-        #else
-        guard let viewerId = Auth.auth().currentUser?.uid else { return }
-        guard viewerId != item.gameLog.userId else { return }
-        let key = "\(viewerId)|feed|\(item.gameLog.id)"
-        guard !trackedImpressionKeys.contains(key) else { return }
-        trackedImpressionKeys.insert(key)
-        db.collection("log_impressions").addDocument(data: [
-            "log_id": item.gameLog.id,
-            "log_owner_id": item.gameLog.userId,
-            "viewer_user_id": viewerId,
-            "source": "feed",
-            "created_at": FieldValue.serverTimestamp()
-        ])
-        #endif
     }
 
     private func ratingBandColor(for value: Double) -> Color {
@@ -2290,72 +2465,473 @@ struct ContentView: View {
         return (relative, Self.feedAbsoluteFormatter.string(from: date))
     }
 
-    private func publicListRow(list: UserList) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            listPreviewStack(list.id)
+    private func shareFeedGameCard(_ item: FeedActivityItem) {
+        guard !isPreparingShareCard else { return }
+        isPreparingShareCard = true
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(list.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(ColorTheme.text)
-                        .lineLimit(2)
-                    Spacer()
-                    Image(systemName: "globe")
-                        .font(.caption2)
-                        .foregroundColor(ColorTheme.subtext)
-                    Text(list.type.titleText)
-                        .font(.caption)
-                        .foregroundColor(ColorTheme.subtext)
+        Task { @MainActor in
+            let fallbackName = item.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Gamer" : item.username
+            let identity = await GamerLndShareCardRenderer.fetchUserIdentity(
+                userId: item.gameLog.userId,
+                fallbackName: fallbackName
+            )
+            let avatarImage = await GamerLndShareCardRenderer.loadAvatarImage(urlString: identity.avatarURL)
+            let resolvedHandle = (identity.handle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                                  ? identity.handle!
+                                  : identity.displayName.replacingOccurrences(of: " ", with: "").lowercased())
+                .replacingOccurrences(of: "@", with: "")
+            let gameId = item.gameLog.gameId
+            let average = await fetchAverageRatingForShare(gameId: gameId)
+            let request = ReviewShareCardRequest(
+                gameTitle: displayGameName(item),
+                releaseYear: gameYearCache[gameId],
+                primaryStudio: gamePublisherCache[gameId],
+                username: resolvedHandle,
+                displayName: identity.displayName,
+                userRating: item.gameLog.rating,
+                averageRating: average,
+                reviewText: item.gameLog.review,
+                coverImageId: item.gameLog.cover?.imageId,
+                avatarImage: avatarImage
+            )
+            let payload = await GamerLndShareCardRenderer.makeReviewSharePayload(request: request)
+            isPreparingShareCard = false
+            if let payload {
+                activeShareSheet = payload
+            } else {
+                alertMessage = "Could not generate share card right now."
+                showAlert = true
+            }
+        }
+    }
+
+    private func shareFeedListCard(_ list: UserList) {
+        guard !isPreparingShareCard else { return }
+        isPreparingShareCard = true
+
+        Task { @MainActor in
+            let identity = await GamerLndShareCardRenderer.fetchUserIdentity(
+                userId: list.ownerId,
+                fallbackName: list.title
+            )
+            let avatarImage = await GamerLndShareCardRenderer.loadAvatarImage(urlString: identity.avatarURL)
+            let shareItems = await fetchShareListItems(for: list)
+            let topEntries = Array(shareItems.prefix(10)).enumerated().map { index, item in
+                ShareListEntry(
+                    id: item.id,
+                    title: displayName(for: item),
+                    coverImageId: item.coverImageId,
+                    rank: list.type == .ranked ? (item.order.map { $0 + 1 } ?? (index + 1)) : nil,
+                    tier: item.tier
+                )
+            }
+
+            let tierRows: [ShareTierPreviewRow]
+            if list.type == .tiered {
+                let labels = normalizedTierLabels(for: list)
+                let colors = normalizedTierColors(for: list)
+                tierRows = Array(labels.enumerated().map { index, label in
+                    let titles = shareItems
+                        .filter { (($0.tier ?? "").trimmingCharacters(in: .whitespacesAndNewlines)).caseInsensitiveCompare(label) == .orderedSame }
+                        .prefix(3)
+                        .map(displayName(for:))
+                    return ShareTierPreviewRow(
+                        id: "tier_\(index)",
+                        label: label,
+                        colorHex: index < colors.count ? colors[index] : "#6E7681",
+                        itemTitles: titles,
+                        coverImageIds: shareItems
+                            .filter { (($0.tier ?? "").trimmingCharacters(in: .whitespacesAndNewlines)).caseInsensitiveCompare(label) == .orderedSame }
+                            .prefix(3)
+                            .compactMap(\.coverImageId)
+                    )
+                }.prefix(5))
+            } else {
+                tierRows = []
+            }
+
+            let request = ListShareCardRequest(
+                title: list.title,
+                ownerName: identity.displayName,
+                ownerHandle: identity.handle,
+                ownerAvatarImage: avatarImage,
+                type: list.type,
+                description: list.description,
+                itemCount: max(list.itemCount, shareItems.count),
+                topEntries: topEntries,
+                tierPreviewRows: tierRows
+            )
+
+            let payload = await GamerLndShareCardRenderer.makeListSharePayload(request: request)
+            isPreparingShareCard = false
+            if let payload {
+                activeShareSheet = payload
+            } else {
+                alertMessage = "Could not generate share card right now."
+                showAlert = true
+            }
+        }
+    }
+
+    private func fetchAverageRatingForShare(gameId: Int) async -> Double? {
+        if let cached = avgCache[gameId]?.avg {
+            return cached
+        }
+        return await withCheckedContinuation { continuation in
+            GamerLndScoreService.shared.fetchAverage(gameId: gameId) { avg, count in
+                Task { @MainActor in
+                    avgCache[gameId] = (avg: avg, count: count)
                 }
+                continuation.resume(returning: avg)
+            }
+        }
+    }
+
+    private func fetchShareListItems(for list: UserList) async -> [UserListItem] {
+        do {
+            let snap = try await db.collection("lists").document(list.id)
+                .collection("items")
+                .order(by: "added_at", descending: false)
+                .getDocuments()
+            let parsed = snap.documents.compactMap { doc -> UserListItem? in
+                var data = doc.data()
+                data["list_id"] = list.id
+                return UserListItem(id: doc.documentID, data: data)
+            }
+            hydrateFeedListItemNamesIfNeeded(parsed)
+            switch list.type {
+            case .regular:
+                return parsed.sorted { ($0.addedAt ?? .distantPast) > ($1.addedAt ?? .distantPast) }
+            case .ranked, .tiered:
+                return parsed.sorted { ($0.order ?? 0) < ($1.order ?? 0) }
+            }
+        } catch {
+            return []
+        }
+    }
+
+    private func hydrateFeedListItemNamesIfNeeded(_ parsed: [UserListItem]) {
+        let ids = Array(Set(parsed.filter {
+            let name = $0.gameName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty || name.hasPrefix("Game #") || name == "Unknown Game"
+        }.map(\.gameId)))
+        guard !ids.isEmpty else { return }
+        Task {
+            let fetched = await GameNameCache.shared.fillAndGet(namesFor: ids)
+            await MainActor.run {
+                for (gameId, name) in fetched where !name.isEmpty {
+                    gameNameCache[gameId] = name
+                }
+            }
+        }
+    }
+
+    private func displayName(for item: UserListItem) -> String {
+        let name = item.gameName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty || name.hasPrefix("Game #") || name == "Unknown Game" {
+            if let cached = gameNameCache[item.gameId], !cached.isEmpty {
+                return cached
+            }
+            return "Game #\(item.gameId)"
+        }
+        return name
+    }
+
+    private func normalizedTierLabels(for list: UserList) -> [String] {
+        let labels = (list.tierLabels ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return labels.isEmpty ? ["S", "A", "B", "C", "Not Ranked"] : labels
+    }
+
+    private func normalizedTierColors(for list: UserList) -> [String] {
+        let colors = (list.tierColors ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return colors.isEmpty ? ["#E5484D", "#F08C2B", "#F3C64D", "#4E8CFF", "#2FBF71"] : colors
+    }
+
+    private func publicListRow(list: UserList) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            listPreviewStack(list.id)
+                .frame(width: 122, height: 122)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(list.title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundColor(ColorTheme.text)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(spacing: 6) {
+                        Image(systemName: list.isPublic ? "globe" : "lock.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(list.isPublic ? ColorTheme.accent : ColorTheme.subtext)
+                        Text(list.type.titleText)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(ColorTheme.subtext)
+                    }
+                }
+
+                Spacer(minLength: 2)
+
                 HStack(spacing: 6) {
                     let ownerName = listOwnerNames[list.ownerId] ?? "User"
-                    Image(systemName: "person.fill.checkmark")
-                        .font(.caption2)
-                        .foregroundColor(ColorTheme.subtext)
+                    AvatarView(
+                        name: ownerName,
+                        size: 18,
+                        avatarURL: resolvedCachedAvatar(for: list.ownerId)
+                    )
                     Text(ownerName)
-                        .font(.caption)
+                        .font(.caption.weight(.semibold))
                         .foregroundColor(ColorTheme.subtext)
                     Text("• \(list.itemCount) games")
                         .font(.caption)
                         .foregroundColor(ColorTheme.subtext)
-                    Spacer()
                 }
+
+                publicListTypeIndicator(list)
             }
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, minHeight: 138, maxHeight: 138, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(ColorTheme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(ColorTheme.separator, lineWidth: 1)
+                )
+        )
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(ColorTheme.background)
+        .padding(.vertical, 6)
         .onAppear {
-            if listOwnerNames[list.ownerId] == nil {
+            if listOwnerNames[list.ownerId] == nil || resolvedCachedAvatar(for: list.ownerId) == nil {
                 Task { await fillListOwnerNamesIfNeeded([list.ownerId]) }
             }
             if publicListPreviews[list.id] == nil {
                 Task { await fetchPublicListPreview(listId: list.id) }
             }
         }
-        .overlay(
-            Rectangle()
-                .fill(ColorTheme.separator.opacity(0.6))
-                .frame(height: 1),
-            alignment: .bottom
+    }
+
+    private func shareablePublicListRow(list: UserList) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            NavigationLink(
+                destination: ListDetailView(list: list, isOwner: list.ownerId == Auth.auth().currentUser?.uid)
+            ) {
+                publicListRow(list: list)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                shareFeedListCard(list)
+            } label: {
+                shareButtonBadge
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 20)
+            .padding(.bottom, 16)
+        }
+    }
+
+    private func compactPublicListCard(list: UserList) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                listPreviewStack(list.id)
+                    .frame(width: 92, height: 92)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(list.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(ColorTheme.text)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(spacing: 6) {
+                        let ownerName = listOwnerNames[list.ownerId] ?? "User"
+                        AvatarView(
+                            name: ownerName,
+                            size: 16,
+                            avatarURL: resolvedCachedAvatar(for: list.ownerId)
+                        )
+                        Text(ownerName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(ColorTheme.subtext)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: list.isPublic ? "globe" : "lock.fill")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(list.isPublic ? ColorTheme.accent : ColorTheme.subtext)
+                        Text("\(list.itemCount) games")
+                            .font(.caption)
+                            .foregroundColor(ColorTheme.subtext)
+                    }
+                }
+            }
+
+            publicListTypeIndicator(list)
+        }
+        .padding(12)
+        .frame(width: 296, height: 148, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(ColorTheme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(ColorTheme.separator, lineWidth: 1)
+                )
         )
+        .onAppear {
+            if listOwnerNames[list.ownerId] == nil || resolvedCachedAvatar(for: list.ownerId) == nil {
+                Task { await fillListOwnerNamesIfNeeded([list.ownerId]) }
+            }
+            if publicListPreviews[list.id] == nil {
+                Task { await fetchPublicListPreview(listId: list.id) }
+            }
+        }
+    }
+
+    private func shareableCompactPublicListCard(list: UserList) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            NavigationLink(
+                destination: ListDetailView(list: list, isOwner: list.ownerId == Auth.auth().currentUser?.uid)
+            ) {
+                compactPublicListCard(list: list)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                shareFeedListCard(list)
+            } label: {
+                shareButtonBadge
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 10)
+            .padding(.bottom, 10)
+        }
+    }
+
+    private var shareButtonBadge: some View {
+        Image(systemName: "square.and.arrow.up")
+            .font(.caption.weight(.semibold))
+            .foregroundColor(ColorTheme.text)
+            .frame(width: 30, height: 30)
+            .background(
+                Circle()
+                    .fill(ColorTheme.surface.opacity(0.98))
+                    .overlay(
+                        Circle()
+                            .stroke(ColorTheme.separator, lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.16), radius: 6, x: 0, y: 3)
     }
 
     private func listPreviewStack(_ listId: String) -> some View {
         let covers = publicListPreviews[listId] ?? []
-        return HStack(spacing: 4) {
-            ForEach(0..<4, id: \.self) { idx in
-                if idx < covers.count {
-                    GameCoverImage(id: covers[idx], preset: .custom(width: 28), cornerRadius: 5)
-                        .frame(width: 28, height: 36)
-                } else {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(ColorTheme.separator.opacity(0.2))
-                        .frame(width: 28, height: 36)
-                }
+        return VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                previewCoverCell(covers: covers, idx: 0)
+                previewCoverCell(covers: covers, idx: 1)
+            }
+            HStack(spacing: 6) {
+                previewCoverCell(covers: covers, idx: 2)
+                previewCoverCell(covers: covers, idx: 3)
             }
         }
+        .padding(6)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.black.opacity(0.16))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func previewCoverCell(covers: [String], idx: Int) -> some View {
+        if idx < covers.count {
+            GameCoverImage(id: covers[idx], preset: .custom(width: 44), cornerRadius: 8)
+                .frame(width: 44, height: 59)
+                .clipped()
+        } else {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(ColorTheme.separator.opacity(0.2))
+                .frame(width: 44, height: 59)
+                .overlay(
+                    Image(systemName: idx == 0 ? "list.bullet.rectangle" : "sparkles.rectangle.stack")
+                        .font(.caption.weight(.bold))
+                        .foregroundColor(ColorTheme.subtext)
+                )
+        }
+    }
+
+    @ViewBuilder
+    private func publicListTypeIndicator(_ list: UserList) -> some View {
+        switch list.type {
+        case .tiered:
+            HStack(spacing: 4) {
+                let defaultTierRow = ["#E74C3C", "#E67E22", "#F1C40F", "#3498DB", "#2ECC71"]
+                let colors = list.tierColors?.isEmpty == false ? list.tierColors! : defaultTierRow
+                ForEach(Array(colors.prefix(5).enumerated()), id: \.offset) { _, hex in
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(colorFromHex(hex))
+                        .frame(width: 14, height: 8)
+                }
+                Text("Tiered")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(ColorTheme.subtext)
+            }
+        case .ranked:
+            HStack(spacing: 4) {
+                rankedPreviewBadge("1", icon: "medal.fill", tint: ColorTheme.accent)
+                rankedPreviewBadge("2", icon: nil, tint: ColorTheme.subtext)
+                rankedPreviewBadge("3", icon: nil, tint: ColorTheme.subtext.opacity(0.9))
+                Text("Ranked")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(ColorTheme.subtext)
+            }
+        case .regular:
+            HStack(spacing: 6) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(ColorTheme.accent)
+                Text("Standard")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(ColorTheme.subtext)
+            }
+        }
+    }
+
+    private func rankedPreviewBadge(_ text: String, icon: String?, tint: Color) -> some View {
+        HStack(spacing: 2) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 7, weight: .bold))
+            }
+            Text(text)
+                .font(.system(size: 9, weight: .bold))
+        }
+        .foregroundColor(tint)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(ColorTheme.surface.opacity(0.75))
+                .overlay(Capsule().stroke(tint.opacity(0.45), lineWidth: 1))
+        )
+    }
+
+    private func colorFromHex(_ hex: String) -> Color {
+        let trimmed = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        var value = trimmed
+        if value.hasPrefix("#") { value.removeFirst() }
+        guard value.count == 6, let number = Int(value, radix: 16) else {
+            return ColorTheme.separator
+        }
+        let r = Double((number >> 16) & 0xFF) / 255.0
+        let g = Double((number >> 8) & 0xFF) / 255.0
+        let b = Double(number & 0xFF) / 255.0
+        return Color(red: r, green: g, blue: b)
     }
 
     private var floatingCreateButton: some View {
@@ -2537,6 +3113,15 @@ struct ContentView: View {
     }
 
     private func loadRatingsOverlayData(gameId: Int) async {
+        let overlayToken = gameId
+        defer {
+            Task { @MainActor in
+                if ratingsOverlayGameId == overlayToken {
+                    ratingsOverlayLoading = false
+                }
+            }
+        }
+
         do {
             var followingSet = followingIds
             if followingSet.isEmpty, let uid = Auth.auth().currentUser?.uid {
@@ -2544,11 +3129,12 @@ struct ContentView: View {
                 followingSet = Set(fetched)
                 await MainActor.run { self.followingIds = followingSet }
             }
-            let snap = try await db.collection("game_logs")
+            let ratingsDB = Firestore.firestore()
+            let snap = try await ratingsDB.collection("game_logs")
                 .whereField("game_id", isEqualTo: gameId)
                 .getDocuments()
 
-            var entries: [RatingsOverlayEntry] = []
+            var entriesByUserId: [String: (entry: RatingsOverlayEntry, sortTimestamp: Timestamp)] = [:]
             let currentUserId = Auth.auth().currentUser?.uid
 
             for d in snap.documents {
@@ -2569,29 +3155,45 @@ struct ContentView: View {
                 guard let val = ratingValue else { continue }
 
                 let review = (data["review"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                entries.append(
-                    RatingsOverlayEntry(
-                        userId: uid,
-                        displayName: "User",
-                        username: "",
-                        rating: val,
-                        isTrusted: trustedCache[uid] ?? false,
-                        isFollowing: followingSet.contains(uid),
-                        review: review?.isEmpty == true ? nil : review,
-                        isCurrentUser: uid == currentUserId
-                    )
+                let sortTimestamp =
+                    (data["updated_at"] as? Timestamp)
+                    ?? (data["play_date"] as? Timestamp)
+                    ?? (data["created_at"] as? Timestamp)
+                    ?? Timestamp(date: .distantPast)
+                let candidate = RatingsOverlayEntry(
+                    userId: uid,
+                    displayName: "User",
+                    username: "",
+                    rating: val,
+                    isTrusted: trustedCache[uid] ?? false,
+                    isFollowing: followingSet.contains(uid),
+                    review: review?.isEmpty == true ? nil : review,
+                    isCurrentUser: uid == currentUserId
                 )
+
+                if let existing = entriesByUserId[uid] {
+                    let shouldReplace =
+                        sortTimestamp.dateValue() > existing.sortTimestamp.dateValue()
+                        || (sortTimestamp == existing.sortTimestamp
+                            && (candidate.review?.isEmpty == false && existing.entry.review?.isEmpty != false))
+                    if shouldReplace {
+                        entriesByUserId[uid] = (candidate, sortTimestamp)
+                    }
+                } else {
+                    entriesByUserId[uid] = (candidate, sortTimestamp)
+                }
             }
 
-            let userIds = Array(Set(entries.map { $0.userId }))
-            await fillUsernameCacheIfNeeded(userIds)
-            let mapped = entries.map { entry in
-                RatingsOverlayEntry(
+            let entries = entriesByUserId.values.map(\.entry)
+            let userProfiles = await fetchRatingsOverlayProfiles(for: Array(Set(entries.map(\.userId))))
+            let mapped: [RatingsOverlayEntry] = entries.map { entry in
+                let profile = userProfiles[entry.userId]
+                return RatingsOverlayEntry(
                     userId: entry.userId,
-                    displayName: displayNameCache[entry.userId] ?? usernameCache[entry.userId] ?? "User",
-                    username: usernameCache[entry.userId] ?? "",
+                    displayName: profile?.displayName ?? displayNameCache[entry.userId] ?? usernameCache[entry.userId] ?? "User",
+                    username: profile?.username ?? usernameCache[entry.userId] ?? "",
                     rating: entry.rating,
-                    isTrusted: trustedCache[entry.userId] ?? false,
+                    isTrusted: profile?.isTrusted ?? trustedCache[entry.userId] ?? false,
                     isFollowing: entry.isFollowing,
                     review: entry.review,
                     isCurrentUser: entry.isCurrentUser
@@ -2604,12 +3206,54 @@ struct ContentView: View {
             }
 
             await MainActor.run {
+                guard ratingsOverlayGameId == overlayToken else { return }
                 ratingsOverlayList = sorted
-                ratingsOverlayLoading = false
             }
         } catch {
-            await MainActor.run { ratingsOverlayLoading = false }
+            return
         }
+    }
+
+    private func fetchRatingsOverlayProfiles(for userIds: [String]) async -> [String: (displayName: String, username: String, isTrusted: Bool)] {
+        let filtered = Array(Set(userIds)).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !filtered.isEmpty else { return [:] }
+
+        let db = Firestore.firestore()
+        typealias RatingsOverlayProfile = (displayName: String, username: String, isTrusted: Bool)
+        let fetched = await withTaskGroup(of: (String, RatingsOverlayProfile?).self) { group in
+            for userId in filtered {
+                group.addTask {
+                    do {
+                        let snap = try await db.collection("users").document(userId).getDocument()
+                        guard let data = snap.data() else { return (userId, nil) }
+                        let username = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
+                        let displayName = ((data["display_name"] as? String)?.isEmpty == false ? data["display_name"] as? String : nil) ?? username
+                        let isTrusted = (data["is_trusted_gamer"] as? Bool) ?? false
+                        return (userId, (displayName, username, isTrusted))
+                    } catch {
+                        return (userId, nil)
+                    }
+                }
+            }
+
+            var map: [String: RatingsOverlayProfile] = [:]
+            for await result in group {
+                if let profile = result.1 {
+                    map[result.0] = profile
+                }
+            }
+            return map
+        }
+
+        await MainActor.run {
+            for (userId, profile) in fetched {
+                displayNameCache[userId] = profile.displayName
+                usernameCache[userId] = profile.username
+                trustedCache[userId] = profile.isTrusted
+            }
+        }
+
+        return fetched
     }
 
     private func loadWatchlistIds() async {
@@ -2629,25 +3273,71 @@ struct ContentView: View {
             let snap = try await db.collection("lists")
                 .whereField("is_public", isEqualTo: true)
                 .order(by: "updated_at", descending: true)
-                .limit(to: 12)
+                .limit(to: 24)
                 .getDocuments()
-            let lists: [UserList] = snap.documents.compactMap { UserList(id: $0.documentID, data: $0.data()) }
-            var previews: [String: [String]] = [:]
-            for d in snap.documents {
-                if let arr = d.data()["preview_cover_ids"] as? [String], !arr.isEmpty {
-                    previews[d.documentID] = Array(arr.prefix(4))
-                }
-            }
-            await MainActor.run {
-                self.publicLists = lists
-                for (k, v) in previews { self.publicListPreviews[k] = v }
-            }
-            let ownerIds = Array(Set(lists.map { $0.ownerId }))
-            await fillListOwnerNamesIfNeeded(ownerIds)
-            await loadPublicListPreviews(lists)
+            await consumePublicListSnapshot(snap)
         } catch {
-            await MainActor.run { self.publicLists = [] }
+            do {
+                let fallback = try await db.collection("lists")
+                    .whereField("is_public", isEqualTo: true)
+                    .limit(to: 24)
+                    .getDocuments()
+                await consumePublicListSnapshot(fallback)
+            } catch {
+                await MainActor.run { self.publicLists = [] }
+            }
         }
+    }
+
+    private func consumePublicListSnapshot(_ snap: QuerySnapshot) async {
+        let lists: [UserList] = snap.documents.compactMap { parsePublicListDocument($0) }
+            .sorted { $0.updatedAt.dateValue() > $1.updatedAt.dateValue() }
+        var previews: [String: [String]] = [:]
+        for d in snap.documents {
+            if let arr = d.data()["preview_cover_ids"] as? [String], !arr.isEmpty {
+                previews[d.documentID] = Array(arr.prefix(4))
+            }
+        }
+        await MainActor.run {
+            self.publicLists = lists
+            for (k, v) in previews { self.publicListPreviews[k] = v }
+        }
+        let ownerIds = Array(Set(lists.map { $0.ownerId }))
+        await fillListOwnerNamesIfNeeded(ownerIds)
+        await loadPublicListPreviews(lists)
+    }
+
+    private func parsePublicListDocument(_ doc: QueryDocumentSnapshot) -> UserList? {
+        let data = doc.data()
+        let id = (data["id"] as? String) ?? doc.documentID
+        let ownerId = (data["owner_id"] as? String) ?? ""
+        guard !ownerId.isEmpty else { return nil }
+
+        let typeRaw = (data["type"] as? String) ?? "regular"
+        let type = ListType(rawValue: typeRaw) ?? .regular
+        let title = (data["title"] as? String) ?? "Untitled"
+        let description = (data["description"] as? String) ?? ""
+        let isPublic = (data["is_public"] as? Bool) ?? true
+        let createdAt = (data["created_at"] as? Timestamp) ?? (data["updated_at"] as? Timestamp) ?? Timestamp(date: Date())
+        let updatedAt = (data["updated_at"] as? Timestamp) ?? createdAt
+        let itemCount = (data["item_count"] as? Int) ?? (data["item_count"] as? NSNumber)?.intValue ?? 0
+
+        return UserList(
+            id: id,
+            ownerId: ownerId,
+            title: title,
+            description: description,
+            type: type,
+            isPublic: isPublic,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            itemCount: itemCount,
+            tierLabels: data["tier_labels"] as? [String],
+            tierColors: data["tier_colors"] as? [String],
+            tierTextColors: data["tier_text_colors"] as? [String],
+            rankedShowNumbers: (data["ranked_show_numbers"] as? Bool) ?? true,
+            rankedTopDecoration: data["ranked_top_decoration"] as? String
+        )
     }
 
     private func loadPublicListPreviews(_ lists: [UserList]) async {
@@ -2708,54 +3398,18 @@ struct ContentView: View {
     }
 
     private func fillListOwnerNamesIfNeeded(_ ownerIds: [String]) async {
-        let missing = ownerIds.filter { listOwnerNames[$0] == nil }
-        if missing.isEmpty { return }
-        let chunks = stride(from: 0, to: missing.count, by: 10).map { Array(missing[$0..<min($0+10, missing.count)]) }
-        await withTaskGroup(of: Void.self) { group in
-            for chunk in chunks {
-                group.addTask {
-                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                        let db = Firestore.firestore()
-                        db.collection("users")
-                            .whereField("id", in: chunk)
-                            .getDocuments { snap, _ in
-                                if let docs = snap?.documents {
-                                    for d in docs {
-                                        let data = d.data()
-                                        if let id = data["id"] as? String {
-                                            let name = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
-                                            self.listOwnerNames[id] = name
-                                        }
-                                    }
-                                }
-                                cont.resume()
-                            }
-                    }
-                }
-            }
-            for await _ in group { }
+        await fillUsernameCacheIfNeeded(ownerIds)
+        for ownerId in ownerIds {
+            let display = displayNameCache[ownerId] ?? usernameCache[ownerId] ?? "User"
+            listOwnerNames[ownerId] = display
         }
-        let stillMissing = ownerIds.filter { listOwnerNames[$0] == nil }
-        if stillMissing.isEmpty { return }
-        await withTaskGroup(of: Void.self) { group in
-            for uid in stillMissing {
-                group.addTask {
-                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                        let db = Firestore.firestore()
-                        db.collection("users").document(uid).getDocument { snap, _ in
-                            if let data = snap?.data() {
-                                let name = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
-                                self.listOwnerNames[uid] = name
-                            } else {
-                                self.listOwnerNames[uid] = "User"
-                            }
-                            cont.resume()
-                        }
-                    }
-                }
-            }
-            for await _ in group { }
+    }
+
+    private func resolvedCachedAvatar(for userId: String) -> String? {
+        guard let value = avatarCache[userId], !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
         }
+        return value
     }
 
     private func ratingsOverlayView() -> some View {
@@ -2939,41 +3593,62 @@ struct ContentView: View {
     }
 
     private func ratingsOverlayRow(_ row: RatingsOverlayEntry, accent: Color, listWidth: CGFloat, rowHeight: CGFloat) -> some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 6) {
-                Text(row.displayName)
-                    .foregroundColor(row.isCurrentUser ? ColorTheme.accent : ColorTheme.text)
-                if row.isTrusted {
-                    trustedGamerBadge
+        let hasReview = !(row.review?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(row.displayName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(row.isCurrentUser ? ColorTheme.accent : ColorTheme.text)
+                        .lineLimit(1)
+
+                    if row.isTrusted {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(ColorTheme.accent)
+                    }
+                }
+
+                if hasReview {
+                    Text("Review available")
+                        .font(.caption2)
+                        .foregroundColor(ColorTheme.subtext)
                 }
             }
-            Spacer()
-            if let review = row.review, !review.isEmpty {
-                Button {
-                    ratingsOverlayReviewEntry = row
-                } label: {
-                    Image(systemName: "text.quote")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 28, height: 28)
-                        .background(
+
+            Spacer(minLength: 8)
+
+            if hasReview {
+                Image(systemName: "text.quote")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundColor(accent)
+                    .frame(width: 26, height: 26)
+            }
+
+            Text(formatRatingValue(row.rating))
+                .font(.subheadline.weight(.heavy))
+                .foregroundColor(ColorTheme.ratingBandColor(for: row.rating))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(ColorTheme.black.opacity(0.34))
+                        .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(accent.opacity(0.24))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(accent.opacity(0.58), lineWidth: 1)
-                                )
+                                .stroke(accent.opacity(0.42), lineWidth: 1)
                         )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Read review")
-            }
-            RatingHeartBadge(value: row.rating, size: 26)
+                )
         }
         .padding(.horizontal, 12)
         .frame(width: listWidth, height: rowHeight)
         .background(RoundedRectangle(cornerRadius: 10).fill(ColorTheme.surface))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(accent.opacity(0.38), lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .onTapGesture {
+            guard hasReview else { return }
+            ratingsOverlayReviewEntry = row
+        }
     }
 
     private func ratingsReviewOverlay(entry: RatingsOverlayEntry, accent: Color) -> some View {
@@ -2997,7 +3672,9 @@ struct ContentView: View {
                                 .font(.headline.weight(.bold))
                                 .foregroundColor(ColorTheme.text)
                             if entry.isTrusted {
-                                trustedGamerBadge
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(ColorTheme.accent)
                             }
                         }
                         if !ratingsOverlayName.isEmpty {
@@ -3011,11 +3688,19 @@ struct ContentView: View {
 
                 HStack {
                     Spacer()
-                    ratingHeartText(
-                        text: formatRatingValue(entry.rating),
-                        color: ColorTheme.ratingBandColor(for: entry.rating),
-                        size: 44
-                    )
+                    Text(formatRatingValue(entry.rating))
+                        .font(.title2.weight(.heavy))
+                        .foregroundColor(ColorTheme.ratingBandColor(for: entry.rating))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(ColorTheme.surface)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10)
+                                        .stroke(accent.opacity(0.42), lineWidth: 1)
+                                )
+                        )
                     Spacer()
                 }
 
@@ -3276,79 +3961,14 @@ struct ContentView: View {
         }
     }
 
-    private func presentExpandedFeedPreview(for item: FeedActivityItem) {
-        expandedFeedDetailsVisible = true
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
-            expandedFeedItem = item
-        }
-    }
-
-    private func dismissExpandedFeedPreview() {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
-            expandedFeedItem = nil
-        }
-    }
-
-    private func expandedFeedPreviewOverlay(item: FeedActivityItem) -> some View {
-        let targetWidth = min(UIScreen.main.bounds.width - 18, 430)
-        let targetHeight = min(UIScreen.main.bounds.height - 88, 770)
-
-        return ZStack {
-            OverlayBackdrop()
-                .ignoresSafeArea()
-                .onTapGesture {
-                    dismissExpandedFeedPreview()
-                }
-
-            ZStack(alignment: .topTrailing) {
-                expandedFeedPreviewSurface(item: item, width: targetWidth, height: targetHeight)
-
-                Button {
-                    dismissExpandedFeedPreview()
-                } label: {
-                    OverlayCloseButton()
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 12)
-                .padding(.trailing, 12)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            .padding(.horizontal, 6)
-            .transition(.scale(scale: 0.96).combined(with: .opacity))
-        }
-    }
-
-    private func expandedFeedPreviewSurface(item: FeedActivityItem, width: CGFloat, height: CGFloat) -> some View {
-        let rating = item.gameLog.rating ?? 0
-        let shellShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
-
-        let accent = rating > 0 ? ColorTheme.ratingBandColor(for: rating) : ColorTheme.separator
-        let shellGradient = LinearGradient(
-            colors: [accent.opacity(0.18), ColorTheme.surface.opacity(0.96), ColorTheme.surface],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
+    private func openFeedItem(_ item: FeedActivityItem, focusComment: Bool) {
+        logDetailOverlay = LogDetailOverlayContext(
+            id: item.id,
+            gameLog: item.gameLog,
+            gameName: displayGameName(item),
+            username: item.username,
+            focusComment: focusComment
         )
-
-        return ZStack {
-            shellShape
-                .fill(ColorTheme.surface)
-                .background(shellGradient.clipShape(shellShape))
-                .overlay(shellShape.stroke(Color.white.opacity(0.08), lineWidth: 1))
-                .overlay(shellShape.stroke(accent.opacity(0.34), lineWidth: 1))
-                .shadow(color: .black.opacity(0.24), radius: 22, x: 0, y: 14)
-
-            GameLogDetailView(
-                gameLog: item.gameLog,
-                gameName: displayGameName(item),
-                authorUsernameOverride: item.username,
-                focusCommentOnAppear: false,
-                embeddedOverlay: true,
-                hostedInOverlay: true,
-                compactFeedExpansion: true
-            )
-            .frame(width: width, height: height, alignment: .top)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        }
     }
 
     private func logGameOverlay(game: Game) -> some View {
@@ -3393,9 +4013,7 @@ struct ContentView: View {
             return cached
         }
 
-        let gid = item.gameLog.gameId
-        requestGameNameFillIfNeeded(for: gid)
-        return "Game #\(gid)"
+        return "Game #\(item.gameLog.gameId)"
     }
 
     private func requestGameNameFillIfNeeded(for gameId: Int) {
@@ -3436,9 +4054,14 @@ struct ContentView: View {
         return "Game #\(log.gameId)"
     }
 
-    private func fetchLikeCount(for logId: String) {
-        db.collection("review_likes").whereField("log_id", isEqualTo: logId).getDocuments { snap, _ in
-            likeCounts[logId] = snap?.documents.count ?? 0
+    private func fetchLikeCount(for logId: String, expectedVersion: Int? = nil) {
+        db.collection("review_likes").whereField("log_id", isEqualTo: logId).getDocuments(source: .server) { snap, _ in
+            let docs = snap?.documents ?? []
+            let uniqueUsers = Set(docs.map { ($0.data()["user_id"] as? String) ?? $0.documentID })
+            DispatchQueue.main.async {
+                if let expectedVersion, likeMutationVersion[logId] != expectedVersion { return }
+                likeCounts[logId] = uniqueUsers.count
+            }
         }
     }
 
@@ -3448,6 +4071,8 @@ struct ContentView: View {
 
         let shouldLike = !likedSet.contains(logId)
         pendingLikeLogIds.insert(logId)
+        let previousLiked = likedSet.contains(logId)
+        let previousCount = likeCounts[logId] ?? 0
 
         withAnimation(.spring(response: 0.22, dampingFraction: 0.62)) {
             _ = likePulseIds.insert(logId)
@@ -3458,30 +4083,48 @@ struct ContentView: View {
             }
         }
 
-        // Keep the icon snappy, but leave the count to the server refresh so it can't drift.
         if shouldLike {
             likedSet.insert(logId)
+            likeCounts[logId] = previousCount + 1
         } else {
             likedSet.remove(logId)
+            likeCounts[logId] = max(0, previousCount - 1)
         }
 
-        InteractionService.shared.setLike(log: log, shouldLike: shouldLike) { result in
+        InteractionService.shared.setLikeState(log: log, shouldLike: shouldLike) { result in
             pendingLikeLogIds.remove(logId)
             switch result {
-            case .success(let isNowLiked):
-                if isNowLiked {
+            case .success(let state):
+                if state.isLiked {
                     likedSet.insert(logId)
                 } else {
                     likedSet.remove(logId)
                 }
-                fetchLikeCount(for: logId)
+                likeCounts[logId] = state.count
             case .failure:
-                if shouldLike {
-                    likedSet.remove(logId)
-                } else {
+                if previousLiked {
                     likedSet.insert(logId)
+                } else {
+                    likedSet.remove(logId)
                 }
-                fetchLikeCount(for: logId)
+                likeCounts[logId] = previousCount
+            }
+        }
+    }
+
+    private func refreshFeedLikeState(for logId: String, currentUserId: String, expectedVersion: Int? = nil) {
+        guard !currentUserId.isEmpty else { return }
+        db.collection("review_likes")
+            .whereField("user_id", isEqualTo: currentUserId)
+            .whereField("log_id", isEqualTo: logId)
+            .getDocuments(source: .server) { snap, _ in
+            DispatchQueue.main.async {
+                if let expectedVersion, likeMutationVersion[logId] != expectedVersion { return }
+                if (snap?.documents.isEmpty == false) {
+                    likedSet.insert(logId)
+                } else {
+                    likedSet.remove(logId)
+                }
             }
         }
     }
@@ -3520,6 +4163,7 @@ struct ContentView: View {
             GamerLndScoreService.shared.fetchAverage(gameId: gameId) { avg, count in
                 DispatchQueue.main.async {
                     avgCache[gameId] = (avg: avg, count: count)
+                    requestedAverageGameIds.remove(gameId)
                 }
             }
         }
@@ -3541,6 +4185,7 @@ struct ContentView: View {
                     DispatchQueue.main.async {
                         for gameId in chunk {
                             hasLogged[gameId] = found.contains(gameId)
+                            requestedHasLoggedGameIds.remove(gameId)
                         }
                     }
                 }
@@ -3552,23 +4197,14 @@ struct ContentView: View {
         forYouLastDoc = nil; forYouLogs = []; forYouIds = []
         if selectedFeed == "Following" {
             await loadMore(isFollowing: true)
-            Task {
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                if self.forYouLogs.isEmpty {
-                    await self.loadMore(isFollowing: false)
-                }
-            }
         } else {
             await loadMore(isFollowing: false)
-            Task {
-                try? await Task.sleep(nanoseconds: 350_000_000)
-                if self.followingLogs.isEmpty {
-                    await self.loadMore(isFollowing: true)
-                }
-            }
         }
-        Task { await loadWatchlistIds() }
-        if selectedFeedFilter != .logs {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            await loadWatchlistIds()
+        }
+        if selectedFeedFilter == .lists {
             Task { await loadPublicLists() }
         }
     }
@@ -3592,8 +4228,8 @@ struct ContentView: View {
             await loadMore(isFollowing: false)
         }
 
-        if selectedFeedFilter != .logs || publicLists.isEmpty {
-            await loadPublicLists()
+        if selectedFeedFilter == .lists && publicLists.isEmpty {
+            Task { await loadPublicLists() }
         }
     }
 
@@ -3606,8 +4242,22 @@ struct ContentView: View {
             await loadMore(isFollowing: false)
         }
 
-        if selectedFeedFilter != .logs && publicLists.isEmpty {
+        if selectedFeedFilter == .lists && publicLists.isEmpty {
             await loadPublicLists()
+        }
+    }
+
+    private func startInitialHomeBootstrapIfNeeded() {
+        guard isLoggedIn, currentTab == .home else { return }
+        guard !isPreparingInitialHome else { return }
+        guard followingLogs.isEmpty && forYouLogs.isEmpty else { return }
+
+        isPreparingInitialHome = true
+        runFeedTask {
+            await initialLoad()
+            await MainActor.run {
+                isPreparingInitialHome = false
+            }
         }
     }
 
@@ -3650,6 +4300,7 @@ struct ContentView: View {
             }
 
             do {
+                let db = Firestore.firestore()
                 let existingChunkDocs = followingChunkLastDocs
                 let chunkResults = try await withThrowingTaskGroup(of: (String, DocumentSnapshot?, [GameLog]).self) { group in
                     for chunk in chunks {
@@ -3692,27 +4343,59 @@ struct ContentView: View {
 
                 self.followingChunkLastDocs = updatedChunkLastDocs
                 let logs = fetchedLogs.sorted { $0.playDate.dateValue() > $1.playDate.dateValue() }
-                let enriched = await self.enrichLogs(logs)
                 let existingIds = self.followingLogIds
-                let uniques = enriched.filter { !existingIds.contains($0.id) }
-
-                let gameIds = uniques.map { $0.gameLog.gameId }
-                let logIds = uniques.map(\.id)
+                let fastItems = self.fastFeedItems(from: logs).filter { !existingIds.contains($0.id) }
+                let gameIds = fastItems.map { $0.gameLog.gameId }
+                let logIds = fastItems.map(\.id)
                 let isInitialPage = self.followingLogs.isEmpty
-                let priorityGameIds = Array(gameIds.prefix(isInitialPage ? 6 : gameIds.count))
-                let priorityLogIds = Array(logIds.prefix(isInitialPage ? 6 : logIds.count))
+                let priorityGameIds = Array(gameIds.prefix(isInitialPage ? 4 : min(gameIds.count, 6)))
+                let priorityLogIds = Array(logIds.prefix(isInitialPage ? 4 : min(logIds.count, 6)))
                 let deferredGameIds = Array(gameIds.dropFirst(priorityGameIds.count))
                 let deferredLogIds = Array(logIds.dropFirst(priorityLogIds.count))
 
-                self.prefetchAverages(for: priorityGameIds)
-                self.prefetchHasLogged(for: priorityGameIds)
-                self.preloadLikeCounts(for: priorityLogIds)
-                self.preloadCommentState(for: priorityLogIds)
-                self.preloadLikeState(for: priorityLogIds)
+                self.followingLogs.append(contentsOf: fastItems)
+                for item in fastItems { self.followingLogIds.insert(item.id) }
+                self.isLoadingFollowing = false
 
-                if !deferredGameIds.isEmpty || !deferredLogIds.isEmpty {
+                if isInitialPage {
                     Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 450_000_000)
+                        let userIds = Array(Set(logs.map(\.userId)))
+                        await self.fillUsernameCacheIfNeeded(userIds)
+                        let hydratedUsers = self.fastFeedItems(from: logs).filter { self.followingLogIds.contains($0.id) }
+                        self.replaceFeedItems(hydratedUsers, isFollowing: true)
+                        self.prefetchAverages(for: priorityGameIds)
+                        self.preloadLikeCounts(for: priorityLogIds)
+                        self.preloadCommentState(for: priorityLogIds)
+                        self.preloadLikeState(for: priorityLogIds)
+                    }
+                    return
+                }
+
+                Task { @MainActor in
+                    let userIds = Array(Set(logs.map(\.userId)))
+                    await self.fillUsernameCacheIfNeeded(userIds)
+                    let hydratedUsers = self.fastFeedItems(from: logs).filter { self.followingLogIds.contains($0.id) }
+                    self.replaceFeedItems(hydratedUsers, isFollowing: true)
+
+                    let initialDelay: UInt64 = isInitialPage ? 4_000_000_000 : 900_000_000
+                    try? await Task.sleep(nanoseconds: initialDelay)
+
+                    await self.fillGameNameCacheIfNeeded(priorityGameIds)
+                    await self.fillGameMetaCacheIfNeeded(priorityGameIds)
+                    let hydratedGames = self.fastFeedItems(from: logs).filter { self.followingLogIds.contains($0.id) }
+                    self.replaceFeedItems(hydratedGames, isFollowing: true)
+                    self.prefetchAverages(for: priorityGameIds)
+                    self.prefetchHasLogged(for: priorityGameIds)
+                    self.preloadLikeCounts(for: priorityLogIds)
+                    self.preloadCommentState(for: priorityLogIds)
+                    self.preloadLikeState(for: priorityLogIds)
+
+                    if !deferredGameIds.isEmpty || !deferredLogIds.isEmpty {
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        await self.fillGameNameCacheIfNeeded(deferredGameIds)
+                        await self.fillGameMetaCacheIfNeeded(deferredGameIds)
+                        let deferredHydrated = self.fastFeedItems(from: logs).filter { self.followingLogIds.contains($0.id) }
+                        self.replaceFeedItems(deferredHydrated, isFollowing: true)
                         self.prefetchAverages(for: deferredGameIds)
                         self.prefetchHasLogged(for: deferredGameIds)
                         self.preloadLikeCounts(for: deferredLogIds)
@@ -3720,9 +4403,6 @@ struct ContentView: View {
                         self.preloadLikeState(for: deferredLogIds)
                     }
                 }
-                self.followingLogs.append(contentsOf: uniques)
-                for u in uniques { self.followingLogIds.insert(u.id) }
-                self.isLoadingFollowing = false
             } catch {
                 os_log("following page err: %@", error.localizedDescription)
                 self.isLoadingFollowing = false
@@ -3749,27 +4429,59 @@ struct ContentView: View {
                 let logs: [GameLog] = snap.documents.compactMap { d in
                     Self.parseGameLog(docIdFallback: d.documentID, data: d.data())
                 }
-                let enriched = await self.enrichLogs(logs)
                 let existingIds = self.forYouIds
-                let uniques = enriched.filter { !existingIds.contains($0.id) }
-
-                let gameIds = uniques.map { $0.gameLog.gameId }
-                let logIds = uniques.map(\.id)
-                let isInitialPage = self.forYouLastDoc == snap.documents.last && self.forYouLogs.isEmpty
-                let priorityGameIds = Array(gameIds.prefix(isInitialPage ? 6 : gameIds.count))
-                let priorityLogIds = Array(logIds.prefix(isInitialPage ? 6 : logIds.count))
+                let fastItems = self.fastFeedItems(from: logs).filter { !existingIds.contains($0.id) }
+                let gameIds = fastItems.map { $0.gameLog.gameId }
+                let logIds = fastItems.map(\.id)
+                let isInitialPage = self.forYouLogs.isEmpty
+                let priorityGameIds = Array(gameIds.prefix(isInitialPage ? 4 : min(gameIds.count, 6)))
+                let priorityLogIds = Array(logIds.prefix(isInitialPage ? 4 : min(logIds.count, 6)))
                 let deferredGameIds = Array(gameIds.dropFirst(priorityGameIds.count))
                 let deferredLogIds = Array(logIds.dropFirst(priorityLogIds.count))
 
-                self.prefetchAverages(for: priorityGameIds)
-                self.prefetchHasLogged(for: priorityGameIds)
-                self.preloadLikeCounts(for: priorityLogIds)
-                self.preloadCommentState(for: priorityLogIds)
-                self.preloadLikeState(for: priorityLogIds)
+                self.forYouLogs.append(contentsOf: fastItems)
+                for item in fastItems { self.forYouIds.insert(item.id) }
+                self.isLoadingForYou = false
 
-                if !deferredGameIds.isEmpty || !deferredLogIds.isEmpty {
+                if isInitialPage {
                     Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 450_000_000)
+                        let userIds = Array(Set(logs.map(\.userId)))
+                        await self.fillUsernameCacheIfNeeded(userIds)
+                        let hydratedUsers = self.fastFeedItems(from: logs).filter { self.forYouIds.contains($0.id) }
+                        self.replaceFeedItems(hydratedUsers, isFollowing: false)
+                        self.prefetchAverages(for: priorityGameIds)
+                        self.preloadLikeCounts(for: priorityLogIds)
+                        self.preloadCommentState(for: priorityLogIds)
+                        self.preloadLikeState(for: priorityLogIds)
+                    }
+                    return
+                }
+
+                Task { @MainActor in
+                    let userIds = Array(Set(logs.map(\.userId)))
+                    await self.fillUsernameCacheIfNeeded(userIds)
+                    let hydratedUsers = self.fastFeedItems(from: logs).filter { self.forYouIds.contains($0.id) }
+                    self.replaceFeedItems(hydratedUsers, isFollowing: false)
+
+                    let initialDelay: UInt64 = isInitialPage ? 4_000_000_000 : 900_000_000
+                    try? await Task.sleep(nanoseconds: initialDelay)
+
+                    await self.fillGameNameCacheIfNeeded(priorityGameIds)
+                    await self.fillGameMetaCacheIfNeeded(priorityGameIds)
+                    let hydratedGames = self.fastFeedItems(from: logs).filter { self.forYouIds.contains($0.id) }
+                    self.replaceFeedItems(hydratedGames, isFollowing: false)
+                    self.prefetchAverages(for: priorityGameIds)
+                    self.prefetchHasLogged(for: priorityGameIds)
+                    self.preloadLikeCounts(for: priorityLogIds)
+                    self.preloadCommentState(for: priorityLogIds)
+                    self.preloadLikeState(for: priorityLogIds)
+
+                    if !deferredGameIds.isEmpty || !deferredLogIds.isEmpty {
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                        await self.fillGameNameCacheIfNeeded(deferredGameIds)
+                        await self.fillGameMetaCacheIfNeeded(deferredGameIds)
+                        let deferredHydrated = self.fastFeedItems(from: logs).filter { self.forYouIds.contains($0.id) }
+                        self.replaceFeedItems(deferredHydrated, isFollowing: false)
                         self.prefetchAverages(for: deferredGameIds)
                         self.prefetchHasLogged(for: deferredGameIds)
                         self.preloadLikeCounts(for: deferredLogIds)
@@ -3777,9 +4489,6 @@ struct ContentView: View {
                         self.preloadLikeState(for: deferredLogIds)
                     }
                 }
-                self.forYouLogs.append(contentsOf: uniques)
-                for u in uniques { self.forYouIds.insert(u.id) }
-                self.isLoadingForYou = false
             } catch {
                 os_log("foryou page err: %@", error.localizedDescription)
                 self.isLoadingForYou = false
@@ -3788,7 +4497,8 @@ struct ContentView: View {
     }
 
     private func fetchFollowingIds(for uid: String) async -> [String] {
-        await withCheckedContinuation { (cont: CheckedContinuation<[String], Never>) in
+        let db = Firestore.firestore()
+        return await withCheckedContinuation { (cont: CheckedContinuation<[String], Never>) in
             db.collection("follows")
                 .whereField("follower_id", isEqualTo: uid)
                 .getDocuments { snap, _ in
@@ -3819,42 +4529,97 @@ struct ContentView: View {
 
     private func fillUsernameCacheIfNeeded(_ userIds: [String]) async {
         let missing = userIds.filter {
-            usernameCache[$0] == nil || avatarCache[$0] == nil || displayNameCache[$0] == nil || trustedCache[$0] == nil
+            usernameCache[$0] == nil ||
+            displayNameCache[$0] == nil ||
+            trustedCache[$0] == nil ||
+            avatarCache[$0] == nil ||
+            avatarCache[$0]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
         }
         if missing.isEmpty { return }
         let chunks = stride(from: 0, to: missing.count, by: 10).map { Array(missing[$0..<min($0+10, missing.count)]) }
-        let db = self.db
-        await withTaskGroup(of: Void.self) { group in
+        let db = Firestore.firestore()
+
+        struct UserCacheRecord {
+            let id: String
+            let username: String
+            let displayName: String
+            let avatarURL: String?
+            let isTrusted: Bool
+        }
+
+        let records = await withTaskGroup(of: [UserCacheRecord].self) { group in
             for chunk in chunks {
                 group.addTask {
-                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    await withCheckedContinuation { (cont: CheckedContinuation<[UserCacheRecord], Never>) in
                         db.collection("users")
-                            .whereField("id", in: chunk)
+                            .whereField(FieldPath.documentID(), in: chunk)
                             .getDocuments { snap, _ in
-                                if let docs = snap?.documents {
-                                    for d in docs {
-                                        let data = d.data()
-                                        if let id = data["id"] as? String {
-                                            let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
-                                            self.usernameCache[id] = uname
-                                            if let display = data["display_name"] as? String, !display.isEmpty {
-                                                self.displayNameCache[id] = display
-                                            } else {
-                                                self.displayNameCache[id] = uname
-                                            }
-                                            if let avatar = data["avatar_url"] as? String, !avatar.isEmpty {
-                                                self.avatarCache[id] = avatar
-                                            }
-                                            self.trustedCache[id] = (data["is_trusted_gamer"] as? Bool) ?? false
-                                        }
-                                    }
-                                }
-                                cont.resume()
+                                let records: [UserCacheRecord] = snap?.documents.compactMap { d in
+                                    let data = d.data()
+                                    let id = (data["id"] as? String) ?? d.documentID
+                                    let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
+                                    let display = ((data["display_name"] as? String)?.isEmpty == false ? data["display_name"] as? String : nil) ?? uname
+                                    let avatar = UserRecordAvatarResolver.url(from: data)
+                                    let trusted = (data["is_trusted_gamer"] as? Bool) ?? false
+                                    return UserCacheRecord(id: id, username: uname, displayName: display, avatarURL: avatar, isTrusted: trusted)
+                                } ?? []
+                                cont.resume(returning: records)
                             }
                     }
                 }
             }
-            for await _ in group { }
+
+            var collected: [UserCacheRecord] = []
+            for await records in group {
+                collected.append(contentsOf: records)
+            }
+            return collected
+        }
+
+        let returnedIds = Set(records.map(\.id))
+        let stillMissing = missing.filter { !returnedIds.contains($0) }
+        if !stillMissing.isEmpty {
+            let fallbackRecords = await withTaskGroup(of: UserCacheRecord?.self) { group in
+                for userId in stillMissing {
+                    group.addTask {
+                        await withCheckedContinuation { (cont: CheckedContinuation<UserCacheRecord?, Never>) in
+                            db.collection("users").document(userId).getDocument { snap, _ in
+                                guard let data = snap?.data() else {
+                                    cont.resume(returning: nil)
+                                    return
+                                }
+                                let uname = (data["username"] as? String) ?? (data["email"] as? String) ?? "User"
+                                let display = ((data["display_name"] as? String)?.isEmpty == false ? data["display_name"] as? String : nil) ?? uname
+                                let avatar = UserRecordAvatarResolver.url(from: data)
+                                let trusted = (data["is_trusted_gamer"] as? Bool) ?? false
+                                cont.resume(returning: UserCacheRecord(id: userId, username: uname, displayName: display, avatarURL: avatar, isTrusted: trusted))
+                            }
+                        }
+                    }
+                }
+
+                var collected: [UserCacheRecord] = []
+                for await record in group {
+                    if let record {
+                        collected.append(record)
+                    }
+                }
+                return collected
+            }
+
+            for record in fallbackRecords {
+                usernameCache[record.id] = record.username
+                displayNameCache[record.id] = record.displayName
+                avatarCache[record.id] = record.avatarURL ?? ""
+                trustedCache[record.id] = record.isTrusted
+            }
+        }
+
+        for record in records {
+            usernameCache[record.id] = record.username
+            displayNameCache[record.id] = record.displayName
+            avatarCache[record.id] = record.avatarURL ?? ""
+            trustedCache[record.id] = record.isTrusted
         }
     }
 
@@ -3866,6 +4631,9 @@ struct ContentView: View {
         if missing.isEmpty { return }
         let names = await GameNameCache.shared.fillAndGet(namesFor: missing)
         await MainActor.run {
+            for gid in missing {
+                requestedNameIds.remove(gid)
+            }
             for (gid, name) in names where isUsableGameName(name) {
                 gameNameCache[gid] = name
             }
@@ -3911,7 +4679,7 @@ struct ContentView: View {
         return nil
     }
 
-    static func parseGameLog(docIdFallback: String, data: [String: Any]) -> GameLog? {
+    nonisolated static func parseGameLog(docIdFallback: String, data: [String: Any]) -> GameLog? {
         guard
             let userId = data["user_id"] as? String,
             let gameId = data["game_id"] as? Int,
@@ -3942,6 +4710,7 @@ struct ContentView: View {
 extension Notification.Name {
     static let switchToExplore = Notification.Name("gamerlnd.switchToExplore")
     static let emailVerificationNotDetected = Notification.Name("gamerlnd.emailVerificationNotDetected")
+    static let requestAuthRefreshAfterLogin = Notification.Name("gamerlnd.requestAuthRefreshAfterLogin")
     static let profileOverlayVisibilityChanged = Notification.Name("gamerlnd.profileOverlayVisibilityChanged")
     static let openProfileRewardsPage = Notification.Name("gamerlnd.openProfileRewardsPage")
     static let openGlobalGameLogEditorRequested = Notification.Name("gamerlnd.openGlobalGameLogEditorRequested")
@@ -3961,6 +4730,7 @@ struct FeedActivityItem: Identifiable, Equatable {
 private struct FeedRowCard: View, Equatable {
     let item: FeedActivityItem
     let displayName: String
+    let avatarUrl: String?
     let gameTitle: String
     let isMine: Bool
     let reviewText: String
@@ -3989,6 +4759,7 @@ private struct FeedRowCard: View, Equatable {
     let onOpenOwnProfile: () -> Void
     let onAddToList: () -> Void
     let onSaveGame: () -> Void
+    let onShare: () -> Void
     let onToggleLike: () -> Void
 
     private let coverWidth: CGFloat = 130
@@ -3997,6 +4768,7 @@ private struct FeedRowCard: View, Equatable {
     static func == (lhs: FeedRowCard, rhs: FeedRowCard) -> Bool {
         lhs.item == rhs.item &&
         lhs.displayName == rhs.displayName &&
+        lhs.avatarUrl == rhs.avatarUrl &&
         lhs.gameTitle == rhs.gameTitle &&
         lhs.isMine == rhs.isMine &&
         lhs.reviewText == rhs.reviewText &&
@@ -4109,7 +4881,7 @@ private struct FeedRowCard: View, Equatable {
                                 systemName: "bubble.right",
                                 count: commentCount,
                                 tint: isCommented ? ColorTheme.accent : .white,
-                                countHighlighted: isCommented,
+                                countHighlighted: false,
                                 size: .large
                             )
                         }
@@ -4134,12 +4906,23 @@ private struct FeedRowCard: View, Equatable {
                         }
                         .buttonStyle(.plain)
 
+                        Button(action: onShare) {
+                            FeedActionIcon(
+                                systemName: "square.and.arrow.up",
+                                count: nil,
+                                tint: .white,
+                                size: .large
+                            )
+                        }
+                        .buttonStyle(.plain)
+
                         Button(action: onToggleLike) {
                             FeedActionIcon(
                                 systemName: isLiked ? "hand.thumbsup.fill" : "hand.thumbsup",
                                 count: likeCount,
                                 tint: isLiked ? ColorTheme.accent : .white,
-                                countHighlighted: isLiked,
+                                countHighlighted: false,
+                                badgeStroke: isLiked ? ColorTheme.accent : nil,
                                 size: .large
                             )
                         }
@@ -4208,7 +4991,7 @@ private struct FeedRowCard: View, Equatable {
 
     private var profileHeaderIdentity: some View {
         HStack(spacing: 8) {
-            AvatarView(name: displayName, size: 28, avatarURL: item.avatarUrl)
+            AvatarView(name: displayName, size: 28, avatarURL: avatarUrl)
                 .overlay(Circle().stroke(ColorTheme.separator, lineWidth: 1))
 
             HStack(spacing: 3) {
@@ -4326,7 +5109,7 @@ private struct FeedRowCard: View, Equatable {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 HStack(spacing: 8) {
-                    AvatarView(name: displayName, size: 20, avatarURL: item.avatarUrl)
+                    AvatarView(name: displayName, size: 20, avatarURL: avatarUrl)
                         .overlay(Circle().stroke(ColorTheme.separator, lineWidth: 1))
                     Text("\(displayName)’s review")
                         .font(.caption.weight(.semibold))
@@ -4455,6 +5238,7 @@ private struct FeedActionIcon: View {
     let count: Int?
     var tint: Color = .white
     var countHighlighted: Bool = true
+    var badgeStroke: Color? = nil
     var size: ContentView.ActionIconSize = .regular
 
     var body: some View {
@@ -4467,16 +5251,16 @@ private struct FeedActionIcon: View {
             if let count {
                 Text("\(min(max(count, 0), 99))")
                     .font(size.countFont)
-                    .foregroundColor(countHighlighted ? .white : ColorTheme.subtext)
-                    .shadow(color: .black.opacity(0.65), radius: 0.8, x: 0, y: 0.6)
+                    .foregroundColor(Color.white.opacity(0.95))
+                    .shadow(color: .black.opacity(0.45), radius: 0.6, x: 0, y: 0.4)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(
                         Capsule()
-                            .fill(countHighlighted ? ColorTheme.accent : Color.clear)
+                            .fill(Color.white.opacity(0.08))
                             .overlay(
                                 Capsule().stroke(
-                                    countHighlighted ? ColorTheme.accent : ColorTheme.separator.opacity(0.9),
+                                    badgeStroke ?? (countHighlighted ? ColorTheme.accent : ColorTheme.separator.opacity(0.9)),
                                     lineWidth: 1
                                 )
                             )

@@ -18,31 +18,126 @@ final class InteractionService {
 
     private let db = Firestore.firestore()
 
-    // MARK: - Likes
+    typealias LikeStateResult = (isLiked: Bool, count: Int)
 
-    /// Set like state for a log using a deterministic doc id so there are only two real states:
-    /// liked by the current user, or not liked by the current user.
-    func setLike(log: GameLog,
-                 shouldLike: Bool,
-                 completion: @escaping (Result<Bool, Error>) -> Void) {
-        guard let uid = Auth.auth().currentUser?.uid else { return }
-        let likeId = "\(uid)_\(log.id)"
-        let ref = db.collection("review_likes").document(likeId)
+    private func likeUserKey(from doc: QueryDocumentSnapshot) -> String {
+        let data = doc.data()
+        if let userId = (data["user_id"] as? String), !userId.isEmpty { return userId }
+        if let userId = (data["userId"] as? String), !userId.isEmpty { return userId }
+        if let userId = (data["uid"] as? String), !userId.isEmpty { return userId }
+        if let prefix = doc.documentID.split(separator: "_").first, !prefix.isEmpty { return String(prefix) }
+        return doc.documentID
+    }
 
-        if !shouldLike {
-            ref.delete { error in
+    private func likeUserKey(from data: [String: Any], documentId: String) -> String {
+        if let userId = (data["user_id"] as? String), !userId.isEmpty { return userId }
+        if let userId = (data["userId"] as? String), !userId.isEmpty { return userId }
+        if let userId = (data["uid"] as? String), !userId.isEmpty { return userId }
+        if let prefix = documentId.split(separator: "_").first, !prefix.isEmpty { return String(prefix) }
+        return documentId
+    }
+
+    private func cleanupLikeDocuments(
+        userId: String,
+        logId: String,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        db.collection("review_likes")
+            .whereField("log_id", isEqualTo: logId)
+            .getDocuments(source: .server) { snap, error in
                 if let error {
                     DispatchQueue.main.async { completion(.failure(error)) }
                     return
                 }
-                if uid != log.userId {
-                    NotificationService.shared.delete(
-                        toUserId: log.userId,
-                        relatedLogId: log.id,
-                        type: .like
-                    )
+
+                let docs = (snap?.documents ?? []).filter { doc in
+                    let data = doc.data()
+                    let userField = (data["user_id"] as? String)
+                        ?? (data["userId"] as? String)
+                        ?? (data["uid"] as? String)
+                    return userField == userId || doc.documentID.hasPrefix("\(userId)_")
                 }
-                DispatchQueue.main.async { completion(.success(false)) }
+                guard !docs.isEmpty else {
+                    DispatchQueue.main.async { completion(.success(())) }
+                    return
+                }
+
+                let batch = self.db.batch()
+                for doc in docs {
+                    batch.deleteDocument(doc.reference)
+                }
+
+                batch.commit { commitError in
+                    if let commitError {
+                        DispatchQueue.main.async { completion(.failure(commitError)) }
+                        return
+                    }
+                    DispatchQueue.main.async { completion(.success(())) }
+                }
+            }
+    }
+
+    // MARK: - Likes
+
+    func fetchLikeState(
+        logId: String,
+        currentUserId: String,
+        completion: @escaping (Result<LikeStateResult, Error>) -> Void
+    ) {
+        db.collection("review_likes")
+            .whereField("log_id", isEqualTo: logId)
+            .getDocuments(source: .server) { snap, error in
+                if let error {
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                    return
+                }
+
+                let docs = snap?.documents ?? []
+                let uniqueUsers = Set(docs.map { self.likeUserKey(from: $0) })
+                let isLiked = docs.contains { doc in
+                    self.likeUserKey(from: doc) == currentUserId
+                }
+                DispatchQueue.main.async {
+                    completion(.success((isLiked: isLiked, count: uniqueUsers.count)))
+                }
+            }
+    }
+
+    func setLikeState(
+        log: GameLog,
+        shouldLike: Bool,
+        completion: @escaping (Result<LikeStateResult, Error>) -> Void
+    ) {
+        guard let uid = Auth.auth().currentUser?.uid else {
+            DispatchQueue.main.async {
+                completion(.failure(NSError(domain: "InteractionService", code: 401, userInfo: [
+                    NSLocalizedDescriptionKey: "You must be logged in to like a game log."
+                ])))
+            }
+            return
+        }
+        let likeId = "\(uid)_\(log.id)"
+        let ref = db.collection("review_likes").document(likeId)
+
+        let finishByReadingServer: () -> Void = {
+            self.fetchLikeState(logId: log.id, currentUserId: uid, completion: completion)
+        }
+
+        if !shouldLike {
+            self.cleanupLikeDocuments(userId: uid, logId: log.id) { cleanupResult in
+                switch cleanupResult {
+                case .success:
+                    if uid != log.userId {
+                        NotificationService.shared.delete(
+                            toUserId: log.userId,
+                            relatedLogId: log.id,
+                            type: .like
+                        )
+                    }
+                    finishByReadingServer()
+                case .failure(let error):
+                    completion(.failure(error))
+                }
             }
             return
         }
@@ -50,6 +145,8 @@ final class InteractionService {
         let payload: [String: Any] = [
             "id": likeId,
             "user_id": uid,
+            "userId": uid,
+            "uid": uid,
             "log_id": log.id,
             "created_at": Timestamp(date: Date())
         ]
@@ -63,32 +160,54 @@ final class InteractionService {
             enrichedPayload["author_avatar_url"] = avatarURL
         }
 
-        ref.setData(enrichedPayload, merge: false) { error in
-            if let error {
-                DispatchQueue.main.async { completion(.failure(error)) }
-                return
+        self.cleanupLikeDocuments(userId: uid, logId: log.id) { cleanupResult in
+            switch cleanupResult {
+            case .success:
+                ref.setData(enrichedPayload, merge: false) { error in
+                    if let error {
+                        DispatchQueue.main.async { completion(.failure(error)) }
+                        return
+                    }
+                    if uid != log.userId {
+                        NotificationService.shared.create(
+                            toUserId: log.userId,
+                            relatedLogId: log.id,
+                            type: .like
+                        )
+                    }
+                    RewardService.shared.recordGamificationEvent(
+                        RewardService.GamificationEvent(
+                            userId: uid,
+                            kind: .likeLog,
+                            gameId: log.gameId,
+                            releaseYear: nil,
+                            reviewLength: nil,
+                            ratingValue: nil,
+                            searchQuery: nil,
+                            sessionId: RewardService.activeSessionId,
+                            occurredAt: Date()
+                        )
+                    )
+                    finishByReadingServer()
+                }
+            case .failure(let error):
+                completion(.failure(error))
             }
-            if uid != log.userId {
-                NotificationService.shared.create(
-                    toUserId: log.userId,
-                    relatedLogId: log.id,
-                    type: .like
-                )
+        }
+    }
+
+    /// Set like state for a log using a deterministic doc id so there are only two real states:
+    /// liked by the current user, or not liked by the current user.
+    func setLike(log: GameLog,
+                 shouldLike: Bool,
+                 completion: @escaping (Result<Bool, Error>) -> Void) {
+        setLikeState(log: log, shouldLike: shouldLike) { result in
+            switch result {
+            case .success(let state):
+                completion(.success(state.isLiked))
+            case .failure(let error):
+                completion(.failure(error))
             }
-            RewardService.shared.recordGamificationEvent(
-                RewardService.GamificationEvent(
-                    userId: uid,
-                    kind: .likeLog,
-                    gameId: log.gameId,
-                    releaseYear: nil,
-                    reviewLength: nil,
-                    ratingValue: nil,
-                    searchQuery: nil,
-                    sessionId: RewardService.activeSessionId,
-                    occurredAt: Date()
-                )
-            )
-            DispatchQueue.main.async { completion(.success(true)) }
         }
     }
 

@@ -8,7 +8,7 @@ import FirebaseAuth
 final class ReviewPromptManager {
     static let shared = ReviewPromptManager()
 
-    private let minActionsBeforePrompt = 7       // tune: how active before prompting
+    private let minActionsBeforePrompt = 4       // tune: how active before prompting
     private let minDaysBetweenPrompts = 90       // Apple will also throttle internally
 
     private let actionsKeyBase = "review.actions.count"

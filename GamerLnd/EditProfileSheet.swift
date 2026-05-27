@@ -39,7 +39,12 @@ struct EditProfileSheet: View {
             Form {
                 Section(header: Text("Display Name")) {
                     TextField("Your name", text: $displayName)
-                        .onChange(of: displayName) { _, _ in validateName() }
+                        .onChange(of: displayName) { _, newValue in
+                            if newValue.count > ProfileIdentityValidator.maxDisplayNameLength {
+                                displayName = String(newValue.prefix(ProfileIdentityValidator.maxDisplayNameLength))
+                            }
+                            validateName()
+                        }
                     if let e = nameError {
                         Text(e).foregroundColor(ColorTheme.highlight).font(.caption)
                     }
@@ -52,7 +57,7 @@ struct EditProfileSheet: View {
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                             .onChange(of: username) { _, _ in
-                                username = username.replacingOccurrences(of: "@", with: "").lowercased()
+                                username = ProfileIdentityValidator.sanitizedHandleInput(username)
                                 validateUsernameFormat()
                             }
                     }
@@ -112,26 +117,11 @@ struct EditProfileSheet: View {
     }
 
     private func validateName() {
-        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.count < 2 || trimmed.count > 32 {
-            nameError = "Name must be 2–32 characters."
-        } else if ContentModeration.containsForbiddenProfileText(trimmed) {
-            nameError = "Display names cannot include profanity."
-        } else {
-            nameError = nil
-        }
+        nameError = ProfileIdentityValidator.displayNameError(displayName)
     }
 
     private func validateUsernameFormat() {
-        let h = username.lowercased()
-        let ok = h.range(of: "^[a-z0-9_]{3,20}$", options: .regularExpression) != nil
-        if !ok {
-            usernameError = "Username must be 3–20 chars, a–z, 0–9, or _"
-        } else if ContentModeration.containsForbiddenProfileText(h) {
-            usernameError = "Usernames cannot include profanity."
-        } else {
-            usernameError = nil
-        }
+        usernameError = ProfileIdentityValidator.handleError(username)
     }
 
     private func validateBio() {
@@ -145,7 +135,7 @@ struct EditProfileSheet: View {
         guard allValid else { return }
         saving = true
 
-        let normalizedUsername = username.replacingOccurrences(of: "@", with: "").lowercased()
+        let normalizedUsername = ProfileIdentityValidator.sanitizedHandleInput(username)
 
         // Uniqueness check (allow my own doc)
         db.collection("users")
@@ -158,7 +148,18 @@ struct EditProfileSheet: View {
                     self.saving = false
                     return
                 }
-                self.writeProfile(username: normalizedUsername)
+                self.db.collection("users")
+                    .whereField("handle", isEqualTo: normalizedUsername)
+                    .limit(to: 1)
+                    .getDocuments { handleSnap, _ in
+                        let handleTakenByOther = (handleSnap?.documents ?? []).contains { $0.documentID != self.userId }
+                        if handleTakenByOther {
+                            self.usernameError = "That username is taken."
+                            self.saving = false
+                            return
+                        }
+                        self.writeProfile(username: normalizedUsername)
+                    }
             }
     }
 

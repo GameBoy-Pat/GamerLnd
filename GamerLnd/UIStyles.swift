@@ -385,6 +385,11 @@ private struct CachedAvatarImage: View {
 
     @MainActor
     private func load() async {
+        if let dataImage = Self.imageFromDataURL(urlString) {
+            image = dataImage
+            return
+        }
+
         if let cached = AvatarImageCache.shared.object(forKey: urlString as NSString) {
             image = cached
             return
@@ -413,5 +418,14 @@ private struct CachedAvatarImage: View {
         } catch {
             return
         }
+    }
+
+    private static func imageFromDataURL(_ value: String) -> UIImage? {
+        guard value.hasPrefix("data:image"),
+              let commaIndex = value.firstIndex(of: ",") else { return nil }
+        let encoded = String(value[value.index(after: commaIndex)...])
+        guard let data = Data(base64Encoded: encoded),
+              let image = UIImage(data: data) else { return nil }
+        return image
     }
 }

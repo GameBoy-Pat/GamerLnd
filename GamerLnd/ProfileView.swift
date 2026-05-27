@@ -9,7 +9,6 @@ import UniformTypeIdentifiers
 import PhotosUI
 import FirebaseAuth
 import FirebaseFirestore
-import FirebaseStorage
 import os.log
 import Combine
 
@@ -151,7 +150,8 @@ struct ProfileView: View {
     @State private var recentOptimisticRewardSignature: String? = nil
     @State private var recentOptimisticRewardAt: Date? = nil
     @State private var rewardsPageSelection: Int? = 0
-    @AppStorage("hasSeenQuestBoardClaimCue") private var hasSeenQuestBoardClaimCue: Bool = false
+    @AppStorage("hasSeenQuestBoardIntro") private var hasSeenQuestBoardIntro: Bool = false
+    @State private var showQuestBoardIntroAlert: Bool = false
 
     private enum LogListMode {
         case logged
@@ -345,59 +345,73 @@ struct ProfileView: View {
     }
 
     private var profileLifecycleView: AnyView {
-        AnyView(
-            profileBaseView
-                .navigationTitle("")
-                .onAppear(perform: handleProfileAppear)
-                .onReceive(NotificationCenter.default.publisher(for: .rewardXPAwarded), perform: handleRewardNotification)
-                .onReceive(NotificationCenter.default.publisher(for: .gameLogChanged)) { note in
-                    guard let changedUserId = note.userInfo?["user_id"] as? String, changedUserId == userId else { return }
-                    loadRecentLogs()
+        let receivedView = profileBaseView
+            .navigationTitle("")
+            .onAppear(perform: handleProfileAppear)
+            .onReceive(NotificationCenter.default.publisher(for: .rewardXPAwarded), perform: handleRewardNotification)
+            .onReceive(NotificationCenter.default.publisher(for: .gameLogChanged)) { note in
+                guard let changedUserId = note.userInfo?["user_id"] as? String, changedUserId == userId else { return }
+                loadRecentLogs()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .gamificationUpdated), perform: handleGamificationUpdatedNotification)
+            .onReceive(NotificationCenter.default.publisher(for: .openProfileRewardsPage)) { note in
+                selectedPrimarySection = .rewards
+                if let page = note.userInfo?["page"] as? Int {
+                    rewardsPageSelection = page
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .gamificationUpdated), perform: handleGamificationUpdatedNotification)
-                .onReceive(NotificationCenter.default.publisher(for: .openProfileRewardsPage)) { note in
-                    selectedPrimarySection = .rewards
-                    if let page = note.userInfo?["page"] as? Int {
-                        rewardsPageSelection = page
-                    }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .referencesUpdated)) { _ in
+                if isMe {
+                    loadReferences()
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .referencesUpdated)) { _ in
-                    if isMe {
-                        loadReferences()
-                    }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                refreshTimeSensitiveProfileData()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                refreshTimeSensitiveProfileData()
+            }
+
+        let observedView = receivedView
+            .onChange(of: sectionsOrder) { _, _ in handleSectionsOrderChange() }
+            .onChange(of: selectedPrimarySection) { _, _ in
+                loadSelectedSectionData(force: false)
+                playPendingRewardAnimationIfPossible()
+                maybeShowQuestBoardIntro()
+            }
+            .onChange(of: showRewardHistoryOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
+            .onChange(of: showAchievementBoardOverlay) { _, _ in
+                playPendingRewardAnimationIfPossible()
+                postProfileOverlayVisibility()
+            }
+            .onChange(of: showQuestBoardInfoOverlay) { _, _ in
+                postProfileOverlayVisibility()
+            }
+            .onChange(of: showSecretHintOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
+            .onChange(of: showSecretQuestListOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
+            .onChange(of: showTileInfoOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
+            .onChange(of: isAnyProfileOverlayPresented) { _, _ in postProfileOverlayVisibility() }
+
+        let lifecycleView = observedView
+            .alert("Quest Board", isPresented: $showQuestBoardIntroAlert) {
+                Button("OK") {
+                    hasSeenQuestBoardIntro = true
                 }
-                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-                    refreshTimeSensitiveProfileData()
-                }
-                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-                    refreshTimeSensitiveProfileData()
-                }
-                .onChange(of: sectionsOrder) { _, _ in handleSectionsOrderChange() }
-                .onChange(of: selectedPrimarySection) { _, _ in
-                    loadSelectedSectionData(force: false)
-                    playPendingRewardAnimationIfPossible()
-                }
-                .onChange(of: showRewardHistoryOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
-                .onChange(of: showAchievementBoardOverlay) { _, _ in
-                    playPendingRewardAnimationIfPossible()
-                    postProfileOverlayVisibility()
-                }
-                .onChange(of: showQuestBoardInfoOverlay) { _, _ in
-                    postProfileOverlayVisibility()
-                }
-                .onChange(of: showSecretHintOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
-                .onChange(of: showSecretQuestListOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
-                .onChange(of: showTileInfoOverlay) { _, _ in playPendingRewardAnimationIfPossible() }
-                .onChange(of: isAnyProfileOverlayPresented) { _, _ in postProfileOverlayVisibility() }
-                .onAppear { postProfileOverlayVisibility() }
-                .onDisappear {
-                    NotificationCenter.default.post(
-                        name: .profileOverlayVisibilityChanged,
-                        object: nil,
-                        userInfo: ["is_presented": false]
-                    )
-                }
-        )
+            } message: {
+                Text("The Quest Board lives here in the GamerLnd tab. Tap Open to see the full board and claim XP from completed quests.")
+            }
+            .onAppear {
+                postProfileOverlayVisibility()
+                maybeShowQuestBoardIntro()
+            }
+            .onDisappear {
+                NotificationCenter.default.post(
+                    name: .profileOverlayVisibilityChanged,
+                    object: nil,
+                    userInfo: ["is_presented": false]
+                )
+            }
+        return AnyView(lifecycleView)
     }
 
     private var profilePresentationView: AnyView {
@@ -645,6 +659,13 @@ struct ProfileView: View {
         }
         loadRewardState()
         loadGamificationState()
+    }
+
+    private func maybeShowQuestBoardIntro() {
+        guard isMe else { return }
+        guard selectedPrimarySection == .rewards else { return }
+        guard !hasSeenQuestBoardIntro else { return }
+        showQuestBoardIntroAlert = true
     }
 
     private var isAnyProfileOverlayPresented: Bool {
@@ -1220,9 +1241,7 @@ struct ProfileView: View {
         ObjectiveService.shared.claimObjectiveXP(assignment: assignment, objectiveId: objective.id) { granted in
             DispatchQueue.main.async {
                 claimingObjectiveIDs.remove(objective.id)
-                if granted > 0 {
-                    applyOptimisticRewardGrant(delta: granted)
-                } else {
+                if granted <= 0 {
                     loadRewardState()
                 }
                 loadGamificationState()
@@ -1236,20 +1255,11 @@ struct ProfileView: View {
         SecretUnlockService.shared.claimSecretXP(userId: userId, secretId: state.secretId) { granted in
             DispatchQueue.main.async {
                 claimingSecretIDs.remove(state.secretId)
-                if granted > 0 {
-                    applyOptimisticRewardGrant(delta: granted)
-                } else {
+                if granted <= 0 {
                     loadRewardState()
                 }
                 loadGamificationState()
             }
-        }
-    }
-
-    private var hasUnclaimedCompletedQuest: Bool {
-        boardAchievements.contains { achievement in
-            guard let state = achievementStates[achievement.id] else { return false }
-            return state.state == .completed && !state.claimed
         }
     }
 
@@ -1278,7 +1288,6 @@ struct ProfileView: View {
                 }
                 Spacer()
                 Button {
-                    hasSeenQuestBoardClaimCue = true
                     showAchievementBoardOverlay = true
                 } label: {
                     HStack(spacing: 6) {
@@ -1293,15 +1302,6 @@ struct ProfileView: View {
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(ColorTheme.separator, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .overlay(alignment: .trailing) {
-                    if hasUnclaimedCompletedQuest && !hasSeenQuestBoardClaimCue {
-                        Image(systemName: "arrow.right.circle.fill")
-                            .font(.caption.weight(.bold))
-                            .foregroundColor(ColorTheme.accent)
-                            .offset(x: 16)
-                            .transition(.opacity)
-                    }
-                }
             }
 
             HStack(spacing: 8) {
@@ -1922,9 +1922,7 @@ struct ProfileView: View {
                             AchievementService.shared.claimQuestXP(userId: userId, achievementId: achievement.id) { granted in
                                 DispatchQueue.main.async {
                                     claimingQuestIDs.remove(achievement.id)
-                                    if granted > 0 {
-                                        applyOptimisticRewardGrant(delta: granted)
-                                    } else {
+                                    if granted <= 0 {
                                         loadRewardState()
                                     }
                                     loadGamificationState()
@@ -2823,7 +2821,7 @@ struct ProfileView: View {
         self.displayName = (data["display_name"] as? String) ?? (data["username"] as? String) ?? (data["email"] as? String) ?? currentDisplayName
 
         self.bio = String(((data["bio"] as? String) ?? self.bio).prefix(120))
-        self.avatarUrl = data["avatar_url"] as? String
+        self.avatarUrl = UserRecordAvatarResolver.url(from: data)
         self.youtubeURL = (data["youtube_url"] as? String) ?? ""
         self.twitchURL = (data["twitch_url"] as? String) ?? ""
         self.tiktokURL = (data["tiktok_url"] as? String) ?? ""
@@ -2891,7 +2889,7 @@ struct ProfileView: View {
         payload["display_name"] = data["display_name"] as? String
         payload["email"] = data["email"] as? String
         payload["bio"] = data["bio"] as? String
-        payload["avatar_url"] = data["avatar_url"] as? String
+        payload["avatar_url"] = UserRecordAvatarResolver.url(from: data)
         payload["is_trusted_gamer"] = data["is_trusted_gamer"] as? Bool
         payload["favorite_play_style"] = data["favorite_play_style"] as? String
         payload["favorite_platform"] = data["favorite_platform"] as? String
@@ -4986,8 +4984,8 @@ private struct ProfileEditSheet: View {
                 Section(header: Text("Profile")) {
                     TextField("Display Name", text: $displayName)
                         .onChange(of: displayName) { _, newValue in
-                            if newValue.count > 18 {
-                                displayName = String(newValue.prefix(18))
+                            if newValue.count > ProfileIdentityValidator.maxDisplayNameLength {
+                                displayName = String(newValue.prefix(ProfileIdentityValidator.maxDisplayNameLength))
                             }
                         }
 
@@ -4995,7 +4993,14 @@ private struct ProfileEditSheet: View {
                         TextField("Username (unique)", text: $username)
                             .textInputAutocapitalization(.none)
                             .disableAutocorrection(true)
-                            .onChange(of: username) { _, _ in
+                            .onChange(of: username) { _, newValue in
+                                let sanitized = ProfileIdentityValidator.sanitizedHandleInput(newValue)
+                                if sanitized != newValue {
+                                    username = sanitized
+                                }
+                                if username.count > ProfileIdentityValidator.maxHandleLength {
+                                    username = String(username.prefix(ProfileIdentityValidator.maxHandleLength))
+                                }
                                 usernameAvailable = nil
                                 debounceUsernameCheck()
                             }
@@ -5027,29 +5032,12 @@ private struct ProfileEditSheet: View {
                                     .scaledToFill()
                                     .frame(width: 64, height: 64)
                                     .clipShape(Circle())
-                            } else if let url = avatarUrl, !url.isEmpty, let imgURL = URL(string: url) {
-                                AsyncImage(url: imgURL) { phase in
-                                    switch phase {
-                                    case .success(let image):
-                                        image.resizable().scaledToFill()
-                                    case .failure:
-                                        Image(systemName: "person.crop.circle.fill")
-                                            .resizable()
-                                            .scaledToFit()
-                                            .padding(8)
-                                            .foregroundColor(ColorTheme.subtext)
-                                    default:
-                                        ProgressView()
-                                    }
-                                }
-                                .frame(width: 64, height: 64)
-                                .clipShape(Circle())
                             } else {
-                                Image(systemName: "person.crop.circle.fill")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 64, height: 64)
-                                    .foregroundColor(ColorTheme.subtext)
+                                AvatarView(
+                                    name: displayName.isEmpty ? username : displayName,
+                                    size: 64,
+                                    avatarURL: avatarUrl
+                                )
                             }
 
                             Spacer()
@@ -5144,15 +5132,29 @@ private struct ProfileEditSheet: View {
     }
 
     private func checkUsername() {
-        let uname = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let uname = ProfileIdentityValidator.sanitizedHandleInput(username)
         guard !uname.isEmpty else { usernameAvailable = nil; return }
+        if ProfileIdentityValidator.handleError(uname) != nil {
+            usernameAvailable = false
+            return
+        }
         db.collection("users")
             .whereField("username_lower", isEqualTo: uname)
             .limit(to: 1)
             .getDocuments { snap, _ in
                 // available if no doc, OR the only doc is this user
                 let takenByOther = snap?.documents.first(where: { ($0.data()["id"] as? String) != userId }) != nil
-                usernameAvailable = !takenByOther
+                if takenByOther {
+                    usernameAvailable = false
+                    return
+                }
+                self.db.collection("users")
+                    .whereField("handle", isEqualTo: uname)
+                    .limit(to: 1)
+                    .getDocuments { handleSnap, _ in
+                        let handleTakenByOther = handleSnap?.documents.first(where: { ($0.data()["id"] as? String) != userId }) != nil
+                        usernameAvailable = !handleTakenByOther
+                    }
             }
     }
 
@@ -5160,22 +5162,22 @@ private struct ProfileEditSheet: View {
         isSaving = true
         errorText = ""
 
-        let disp = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let uname = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let disp = ProfileIdentityValidator.normalizedDisplayName(displayName)
+        let uname = ProfileIdentityValidator.sanitizedHandleInput(username)
         let bioStored = String(bio.prefix(88))
         let ytStored = youtubeURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let twitchStored = twitchURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let tiktokStored = tiktokURL.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if ContentModeration.containsForbiddenProfileText(disp) {
+        if let error = ProfileIdentityValidator.displayNameError(disp) {
             isSaving = false
-            errorText = "Display names cannot include profanity."
+            errorText = error
             return
         }
 
-        if ContentModeration.containsForbiddenProfileText(uname) {
+        if let error = ProfileIdentityValidator.handleError(uname) {
             isSaving = false
-            errorText = "Usernames cannot include profanity."
+            errorText = error
             return
         }
 
@@ -5185,13 +5187,17 @@ private struct ProfileEditSheet: View {
                 "display_name_lower": disp.lowercased(),
                 "username": uname,
                 "username_lower": uname.lowercased(),
+                "handle": uname,
                 "bio": bioStored,
                 "search_prefix": UserProfile.searchPrefixes(username: disp, handle: uname),
                 "youtube_url": ytStored,
                 "twitch_url": twitchStored,
                 "tiktok_url": tiktokStored
             ]
-            if let url = newAvatarUrl { payload["avatar_url"] = url }
+            if let url = newAvatarUrl {
+                payload["avatar_url"] = url
+                payload["profile_picture_url"] = url
+            }
 
             db.collection("users").document(userId).setData(payload, merge: true) { err in
                 isSaving = false
@@ -5207,7 +5213,7 @@ private struct ProfileEditSheet: View {
 
         // If a new image was selected, upload to Firebase Storage first.
         if let data = pickedImageData {
-            uploadProfileImage(userId: userId, data: data) { url, err in
+            AvatarUploadService.upload(userId: userId, imageData: data) { url, err in
                 if let err = err {
                     self.isSaving = false
                     self.errorText = err.localizedDescription
@@ -5220,41 +5226,6 @@ private struct ProfileEditSheet: View {
         }
     }
 
-    private func uploadProfileImage(userId: String, data: Data, completion: @escaping (String?, Error?) -> Void) {
-        // Try to compress to JPEG to keep size reasonable
-        var uploadData = data
-        var contentType = "image/jpeg"
-        if let ui = UIImage(data: data), let jpeg = ui.jpegData(compressionQuality: 0.9) {
-            uploadData = jpeg
-            contentType = "image/jpeg"
-        } else {
-            contentType = "image/*"
-        }
-
-        let ref = Storage.storage().reference().child("avatars/\(userId).jpg")
-        let meta = StorageMetadata()
-        meta.contentType = contentType
-        ref.putData(uploadData, metadata: meta) { meta, err in
-            if let err = err { completion(nil, err); return }
-            let resolvedRef: StorageReference = ref
-            func fetchURL(retries: Int) {
-                resolvedRef.downloadURL { url, err in
-                    if let url = url {
-                        completion(url.absoluteString, nil)
-                        return
-                    }
-                    if retries > 0 {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            fetchURL(retries: retries - 1)
-                        }
-                    } else {
-                        completion(nil, err)
-                    }
-                }
-            }
-            fetchURL(retries: 2)
-        }
-    }
 }
 
 // MARK: - Reorder Sections View

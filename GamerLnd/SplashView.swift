@@ -4,6 +4,8 @@
 import SwiftUI
 
 struct SplashView: View {
+    var message: String = "Loading GamerLnd..."
+
     var body: some View {
         ZStack {
             ColorTheme.background.ignoresSafeArea()
@@ -19,7 +21,15 @@ struct SplashView: View {
                         .font(.title.weight(.bold))
                         .foregroundColor(ColorTheme.text)
                 }
+
+                ProgressView()
+                    .tint(ColorTheme.accent)
+
+                Text(message)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundColor(ColorTheme.subtext)
             }
+            .padding(.horizontal, 20)
         }
     }
 }
